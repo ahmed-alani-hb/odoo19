@@ -7,9 +7,9 @@ We are a paying customer using your Odoo 19 apps:
 - "Odoo POS Network Printer | Seamless ESC/POS Ticket & Receipt Printing" (cr_pos_network_printer, v19.0.0.8)
 - "POS Kitchen Receipt Printers" (cr_pos_network_printer_res, v19)
 
-We are a restaurant migrating from a local Odoo 17 server to Odoo 19 on **Odoo.sh
-(cloud)**. During our pre-migration review we found a fundamental limitation we'd
-like your help and guidance on.
+We are a restaurant deploying our Point of Sale on **Odoo.sh (cloud)**, and we
+bought your apps for this Odoo 19 setup. During our deployment review we found a
+fundamental limitation we'd like your help and guidance on.
 
 WHAT WE FOUND
 Your modules print **server-side**: the POS browser renders the ticket and calls
@@ -17,11 +17,11 @@ the Odoo route `/cr_print_receipt`, and then the **Odoo server** opens a TCP soc
 to the printer's LAN IP via `python-escpos` `Network(ip, 9100)`. The cash drawer
 (`/open_cash_drawer`) works the same way.
 
-This works perfectly today because our Odoo 17 server sits on the same LAN as the
-printers. But on **Odoo.sh the Odoo server runs in the cloud and cannot reach our
-private LAN printer IPs (192.168.x.x:9100)** — so kitchen printing, receipt/bill
-printing and the cash drawer all stop working. The browser, which IS on the LAN,
-never touches the printer in your design.
+This design works only when the Odoo server sits on the same LAN as the printers
+(a local / on-premise server). But on **Odoo.sh the Odoo server runs in the cloud
+and cannot reach our private LAN printer IPs (192.168.x.x:9100)** — so kitchen
+printing, receipt/bill printing and the cash drawer cannot work. The browser, which
+IS on the LAN, never touches the printer in your design.
 
 OUR REQUESTS
 1. App Store clarity: your listing markets "no IoT Box needed" and network printing
