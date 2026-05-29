@@ -1,49 +1,22 @@
 To: support@creyox.com
-Subject: cr_pos_network_printer (v19) — server-side printing is incompatible with Odoo.sh; please clarify listing + consider a client-side/cloud build
+Subject: Do your POS network printer apps support Odoo.sh? Printing doesn't work in the cloud
 
 Hello Creyox team,
 
-We are a paying customer using your Odoo 19 apps:
-- "Odoo POS Network Printer | Seamless ESC/POS Ticket & Receipt Printing" (cr_pos_network_printer, v19.0.0.8)
-- "POS Kitchen Receipt Printers" (cr_pos_network_printer_res, v19)
+We bought your Odoo 19 apps "Odoo POS Network Printer" and "POS Kitchen Receipt
+Printers" for our restaurant, which runs on Odoo.sh (cloud).
 
-We are a restaurant deploying our Point of Sale on **Odoo.sh (cloud)**, and we
-bought your apps for this Odoo 19 setup. During our deployment review we found a
-fundamental limitation we'd like your help and guidance on.
+The printing is done by the Odoo server rather than the browser, so on Odoo.sh —
+where the server is in the cloud — it cannot reach our local printers. Kitchen
+printing, receipt printing and the cash drawer do not work.
 
-WHAT WE FOUND
-Your modules print **server-side**: the POS browser renders the ticket and calls
-the Odoo route `/cr_print_receipt`, and then the **Odoo server** opens a TCP socket
-to the printer's LAN IP via `python-escpos` `Network(ip, 9100)`. The cash drawer
-(`/open_cash_drawer`) works the same way.
+Could you please help us with two things:
 
-This design works only when the Odoo server sits on the same LAN as the printers
-(a local / on-premise server). But on **Odoo.sh the Odoo server runs in the cloud
-and cannot reach our private LAN printer IPs (192.168.x.x:9100)** — so kitchen
-printing, receipt/bill printing and the cash drawer cannot work. The browser, which
-IS on the LAN, never touches the printer in your design.
-
-OUR REQUESTS
-1. App Store clarity: your listing markets "no IoT Box needed" and network printing
-   without stating that it only works when the **Odoo server is on the same LAN as
-   the printers** (i.e. on-premise / local server), and **not on Odoo.sh / cloud**.
-   Please add a clear compatibility note so cloud customers know before purchase.
-2. Cloud support: please consider a **client-side variant** (browser → printer, e.g.
-   via the Epson ePOS-Print HTTP API) or an officially supported **local print-relay
-   agent**, so the apps can work on Odoo.sh. Any guidance you can share for Odoo.sh
-   customers would be very welcome.
-3. Security: the `/cr_print_receipt` and `/open_cash_drawer` controller routes are
-   declared `auth="none"` with `cors="*"`, and they will open a socket to **any
-   ip:port supplied by the caller**. On an internet-facing Odoo.sh server this is an
-   unauthenticated SSRF and a remote cash-drawer-open endpoint. Please require an
-   authenticated POS session (`auth="user"`) and validate/whitelist the target IP.
-
-Could you let us know (a) whether a cloud/client-side build is on your roadmap and a
-rough timeline, and (b) your recommended setup for driving LAN ESC/POS printers from
-an Odoo.sh-hosted POS? We're happy to share more technical detail or test a fix.
+1. Do your apps officially support Odoo.sh? If not, please state this clearly on
+   the App Store listing so cloud customers know before buying.
+2. Do you have, or plan to release, a version that works on Odoo.sh?
 
 Thank you,
 [Your name]
 Honey Bird
 admin@honey-bird.net
-[Odoo.sh project / order reference, if available]
