@@ -75,6 +75,15 @@ unless the architecture changes.**
 
 ### 🔧 Required changes / decisions before cutover
 1. **Pick a cloud-compatible printing architecture (R1) and prove it in B2:**
+   - **(0) Client-side ePOS — IMPLEMENTED in `cr_pos_network_printer_clientside`.**
+     Reroutes the creyox `cr_network_printer` devices (kitchen + receipt) through
+     Odoo’s native Epson ePOS-Print driver, so the **browser** prints directly to the
+     printer over the LAN and the cloud server is never involved. Verified to install
+     with the creyox modules + `pos_restaurant_robustness` on v19. **Requires printers
+     that support the Epson ePOS-Print HTTP API** (Epson TM-series / ePOS) **plus
+     HTTPS handling** (accept the printer’s cert once per POS device, or enable Chrome
+     Local Network Access). If the printers are generic ESC/POS-over-9100-only, this
+     is impossible from a browser → use (a) or (b).
    - **(a) Odoo IoT Box — recommended.** Printers go on a LAN IoT Box; cloud Odoo
      drives them through it using Odoo’s *standard* printer flow (which our module
      already enhances), so creyox is retired for printing. Lowest long-term surprise;
@@ -88,10 +97,12 @@ unless the architecture changes.**
      hardware, but custom to build and maintain.
    - **(c) Stay on a local Odoo 19 server (on-prem).** Preserves creyox printing
      exactly and removes the internet dependency — at the cost of not using Odoo.sh.
-   > **Zero-surprise recommendation: (a) IoT Box** — the officially supported cloud
-   > pattern, no custom cert/agent burden, and our module already covers that path.
-   > Choose (b) only if avoiding an IoT Box is a hard requirement; (c) if rock-solid
-   > printing matters more than being on the cloud.
+   > **Recommendation:** if your printers are **Epson ePOS-capable**, start with
+   > **(0) client-side** — smallest change, already implemented and install-verified;
+   > prove it in A4/B2. If they are **not** ePOS-capable, use **(a) IoT Box** (most
+   > supported). Use (b) only to avoid an IoT Box; (c) if rock-solid printing matters
+   > more than being on the cloud. **Confirm your exact printer make/model first —
+   > it decides whether (0) is even possible.**
 2. **`python-escpos` dependency.** Whatever server does the actual socket printing
    (cloud for option c, or the local agent for b) needs the `python-escpos` pip
    package. On Odoo.sh add a **root `requirements.txt`** with `python-escpos`
