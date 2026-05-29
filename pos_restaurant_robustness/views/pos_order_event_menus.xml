@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_pos_order_event"
+              name="Kitchen Diagnostics"
+              parent="point_of_sale.menu_point_rep"
+              action="action_pos_order_event"
+              sequence="50"/>
+</odoo>
