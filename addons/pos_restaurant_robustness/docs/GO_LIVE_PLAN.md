@@ -34,19 +34,78 @@ go/no-go gate.
 ## ⚠️ TOP RISKS — read before you start
 | # | Risk | Why it matters | De-risked in |
 |---|---|---|---|
-| R1 | **Cloud can’t reach LAN printers** | Odoo.sh is on the internet; ESC/POS printers are private LAN IPs. If the creyox modules print **server-side**, the cloud server literally cannot open a socket to the printer. | Phase A4 + B2 (must prove a working print path before cutover) |
-| R2 | **Third-party (creyox) modules on v19** | They must exist for **19.0** and install cleanly; their print path must either work with, or be made to work with, the robustness fixes. | Phase A1/A4 |
+| R1 | **Cloud can’t reach LAN printers — CONFIRMED** | Reviewed: creyox prints **server-side** — the browser calls the Odoo route `/cr_print_receipt` and the **server** opens a TCP socket (`escpos … Network(ip, 9100)`) to the printer’s LAN IP. An Odoo.sh **cloud** server cannot reach private LAN IPs → **kitchen + receipt printing and the cash drawer all stop on cloud, as-is.** | Must be solved & proven before cutover — see *Code review findings* + Phase B2 |
+| R2 | **Third-party (creyox) modules on v19** | Reviewed: they ARE genuine 19.0 builds on v19-valid hooks (`createPrinter`, `afterProcessServerData`, `type='jsonrpc'`). They need the **`python-escpos`** pip package and have an **`auth="none"`** print endpoint that must be hardened. | *Code review findings* below + Phase A1 |
 | R3 | **Internet dependency** | Cloud POS is down if the line drops. | Failover prerequisite + Phase B5 drill |
 | R4 | **17→19 is two major versions** | Master-data export/import must be validated; some config is re-entered by hand. | Phase A6/A9 |
 | R5 | **Shared single user, multi-employee/table** | The original “disappearing orders” pain. | Phase A7 + B3 (observed via Diagnostics) |
 
-> **R1 is the make-or-break item.** Likely resolutions if printing is server-side:
-> (a) an **Odoo IoT Box** on the LAN bridging the printers (most robust; note this
-> usually means using Odoo’s *standard* kitchen-printing, which the robustness
-> module already covers); (b) **browser/client-side** printing if the creyox module
-> supports it (browser is on the LAN); or (c) a **local print-relay agent** the
-> cloud can hand jobs to. **Do NOT plan cutover until one of these is proven in
-> Phase B2.**
+> **R1 is now CONFIRMED — it is the make-or-break item. Do not schedule a cutover
+> until it is solved and proven on real printers in Phase B2.** Details and options
+> are in the next section.
+
+## Code review findings — the three custom modules
+
+Reviewed together: **`cr_pos_network_printer`** (receipt/bill printer + cash drawer),
+**`cr_pos_network_printer_res`** (restaurant kitchen printers), and our
+**`pos_restaurant_robustness`**.
+
+### How creyox printing actually works (the decisive fact)
+The browser renders the ticket to an image and calls the Odoo JSON route
+**`/cr_print_receipt`** (and **`/open_cash_drawer`**). The **Odoo server** then opens
+a **TCP socket** to the printer’s LAN IP:port using the `python-escpos`
+`Network(ip, port)` driver and sends the ESC/POS bytes. Kitchen printers
+(`pos.printer` of type *“cr_network_printer”*) are wired via `PosStore.createPrinter`;
+the receipt/bill printer via `PosStore.afterProcessServerData → hardwareProxy.printer`.
+
+**So printing is SERVER-SIDE.** It works today only because the Odoo 17 server sits on
+the same LAN as the printers. On **Odoo.sh (cloud)** the server is on the internet and
+cannot reach `192.168.x.x:9100`, so **all printing and the cash drawer stop working
+unless the architecture changes.**
+
+### ✅ Good news
+- The creyox modules are genuine **19.0** builds and use only v19-valid APIs
+  (verified: `createPrinter`, `afterProcessServerData`, route `type='jsonrpc'`).
+- Their kitchen printers plug in *beneath* Odoo’s standard
+  `sendOrderInPreparation → printChanges → printReceipt → sendPrintingJob` flow — the
+  exact flow `pos_restaurant_robustness` patches. **So our missed-ticket fix (A),
+  double-send guard (B) and Kitchen Diagnostics all apply to the creyox kitchen
+  printers automatically.** No change to our module is needed, and the three modules
+  compose with no method conflicts.
+
+### 🔧 Required changes / decisions before cutover
+1. **Pick a cloud-compatible printing architecture (R1) and prove it in B2:**
+   - **(a) Odoo IoT Box — recommended.** Printers go on a LAN IoT Box; cloud Odoo
+     drives them through it using Odoo’s *standard* printer flow (which our module
+     already enhances), so creyox is retired for printing. Lowest long-term surprise;
+     modest hardware cost.
+   - **(b) Local print-relay agent — keeps creyox’s ESC/POS approach.** Run the
+     `/cr_print_receipt` + `/open_cash_drawer` logic as a small service on a **LAN**
+     box (the old Odoo 17 machine, a mini-PC, or a Pi) and point the browser’s
+     `CrPrinter` at that **local** agent instead of the cloud route. The agent must
+     serve **HTTPS with a certificate the POS devices trust** — the Odoo.sh page is
+     HTTPS, so an `http://` agent is blocked as mixed content. No new printer
+     hardware, but custom to build and maintain.
+   - **(c) Stay on a local Odoo 19 server (on-prem).** Preserves creyox printing
+     exactly and removes the internet dependency — at the cost of not using Odoo.sh.
+   > **Zero-surprise recommendation: (a) IoT Box** — the officially supported cloud
+   > pattern, no custom cert/agent burden, and our module already covers that path.
+   > Choose (b) only if avoiding an IoT Box is a hard requirement; (c) if rock-solid
+   > printing matters more than being on the cloud.
+2. **`python-escpos` dependency.** Whatever server does the actual socket printing
+   (cloud for option c, or the local agent for b) needs the `python-escpos` pip
+   package. On Odoo.sh add a **root `requirements.txt`** with `python-escpos`
+   (`Pillow` is already present); otherwise the module errors on install.
+3. **Harden the print endpoints (do this regardless).** `/cr_print_receipt` and
+   `/open_cash_drawer` are declared `auth="none"` with `cors="*"` and will open a
+   socket to **any ip:port the caller supplies** — on an internet-facing server that
+   is an unauthenticated SSRF + remote cash-drawer-open endpoint. Require an
+   authenticated POS session (`auth="user"`) and validate/whitelist the target IP.
+   Ask Creyox for a hardened/cloud build, or apply it in a thin override — **never
+   expose `auth="none"` on the public internet.**
+4. **Worker load (minor).** Server-side socket printing blocks an Odoo worker for up
+   to ~5 s + retries per ticket. Fine at restaurant scale; just size workers and, for
+   option (b), keep printing off the cloud request workers.
 
 ---
 
@@ -70,10 +129,12 @@ in the cloud — all before touching the restaurant.
 
 ### Day 1 — build, install, automated tests, print-path discovery
 - [ ] **A1. Build the v19 stack locally.** Install Odoo 19; put `odoo-custom-addons`
-      on the addons path (submodule or path); install the **creyox** modules
-      (obtain the **19.0** versions). 🚦 **Gate G-A1:** if any creyox module has no
-      working 19.0 version → STOP and resolve (vendor update / alternative /
-      switch to IoT-Box standard printing) before continuing.
+      on the addons path (submodule or path); install the **creyox** modules (19.0 —
+      confirmed available) and `pip install python-escpos`. Stand up the **chosen
+      cloud-print architecture** from *Code review findings* (IoT Box, or a local
+      print-relay agent) so it can be exercised on the bench. 🚦 **Gate G-A1:** all
+      three modules install cleanly with `python-escpos` present, and the chosen
+      print bridge is in place, before continuing.
 - [ ] **A2. Smoke test.** Create a restaurant POS config (shared user, a few
       products in kitchen categories, 2+ printers/stations, a couple of tables).
       Install `pos_restaurant_robustness`. Confirm **Kitchen Diagnostics** menu
@@ -84,16 +145,14 @@ in the cloud — all before touching the restaurant.
         --test-tags=/pos_restaurant_robustness:TestSyncConcurrencySim,/pos_restaurant_robustness:TestPosOrderEventModel
       ```
       (Full suite incl. UI tours needs a headless browser; run if available.)
-- [ ] **A4. Determine the PRINT PATH (critical).** With a test ESC/POS printer (or a
-      packet capture), send a kitchen order and answer:
-      - Does the print job leave the **Odoo server** (server→printer IP) or the
-        **browser/agent** (LAN→printer)?
-      - Do the creyox modules use Odoo’s standard `sendOrderInPreparation` /
-        `printChanges` flow (→ robustness Fix A/B apply automatically and emit
-        `kitchen_print_*` events), or their **own** print flow (→ fixes must be
-        re-targeted, or switch to standard/IoT printing)?
-      Write the answer in the logbook. 🚦 **Gate G-A4:** you must know the path and
-      have a cloud-viable plan for it (see R1) before Phase B.
+- [ ] **A4. Validate the CLOUD print architecture (critical).** The print path is
+      already known — server-side, confirmed in review — and the robustness fixes are
+      confirmed to wrap the creyox kitchen printers. So A4 is now: with a test ESC/POS
+      printer, prove the **chosen** cloud-print route (IoT Box, or the local agent
+      reached over **HTTPS**) actually prints when Odoo runs cloud-style (i.e. the
+      Odoo server is NOT on the printer LAN), and confirm `kitchen_print_ok/fail`
+      events appear in Kitchen Diagnostics. 🚦 **Gate G-A4:** the chosen architecture
+      prints reliably and is visible in Diagnostics before Phase B.
 - [ ] **A5. Functional POS pass (simulated/desk printer).** Take orders → send to
       kitchen → pay → print bill → refund → split bill → transfer table. Confirm
       each kitchen ticket and each bill. Note anything off in the logbook.
