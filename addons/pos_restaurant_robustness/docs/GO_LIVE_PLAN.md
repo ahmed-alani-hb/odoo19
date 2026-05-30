@@ -86,9 +86,15 @@ unless the architecture changes.**
      is impossible from a browser → use (a) or (b).
      **➤ DECISION (verified May 2026): this deployment's printers are Xprinter =
      generic ESC/POS over port 9100, which do NOT implement Epson ePOS-Print.
-     Option (0) is therefore NOT viable here. The `cr_pos_network_printer_clientside`
-     module stays in the repo for possible future Epson-ePOS hardware only — do not
-     install it for the current Xprinter fleet.**
+     Option (0) is therefore NOT viable here.**
+     **ESC/POS ≠ ePOS-Print** — the common confusion: *ESC/POS* is the low-level byte
+     *command language* (which Xprinter clones, hence "Epson-compatible"); *ePOS-Print
+     / Server Direct Print* is a separate *HTTP/XML web service* baked into Epson
+     **TM-intelligent** printer firmware (`/cgi-bin/epos/service.cgi`) — that web
+     service is what a browser needs, and only genuine Epson ePOS TM models have it.
+     Confirmed against Epson's ePOS/Server-Direct-Print references (TM-series only).
+     The `cr_pos_network_printer_clientside` module stays in the repo for possible
+     future Epson-ePOS hardware only — do not install it for the Xprinter fleet.
    - **(a) Odoo IoT Box — recommended.** Printers go on a LAN IoT Box; cloud Odoo
      drives them through it using Odoo’s *standard* printer flow (which our module
      already enhances), so creyox is retired for printing. Lowest long-term surprise;
@@ -102,11 +108,16 @@ unless the architecture changes.**
      hardware, but custom to build and maintain.
    - **(c) Stay on a local Odoo 19 server (on-prem).** Preserves creyox printing
      exactly and removes the internet dependency — at the cost of not using Odoo.sh.
-   > **Recommendation (printers = Xprinter / generic ESC/POS → (0) client-side is
-   > ruled out):** use **(a) IoT Box** for the most reliable, officially-supported
-   > cloud printing (Xprinter works with it over USB or LAN), **or (b) a local
-   > print-relay agent** if you want to avoid buying a box and stay software-only.
-   > (c) on-prem only if you decide against the cloud. Decide (a) vs (b) before A4/B2.
+   > **DECISION (chosen):** Odoo stays on **Odoo.sh (cloud)**; printing goes through an
+   > **Odoo IoT bridge** on the LAN. Because there is already a **Windows PC** on site,
+   > the recommended bridge is Odoo's **free Windows Virtual IoT** installed on that PC
+   > (no hardware to buy); a physical Odoo **IoT Box** or a **Raspberry Pi** running the
+   > Odoo IoT image are equivalent alternatives. POS clients are **Android tablets**
+   > (tablet → Odoo.sh → IoT bridge → Xprinter; connect the Xprinter by USB = simplest,
+   > or by network). **creyox** and **cr_pos_network_printer_clientside** are *retired
+   > for printing*; **`pos_restaurant_robustness` enhances the native IoT print flow**
+   > this path uses. To validate in Phase A: IoT↔Odoo.sh pairing, Xprinter detection,
+   > and a real kitchen-ticket + receipt + cash-drawer print.
 2. **`python-escpos` dependency.** Whatever server does the actual socket printing
    (cloud for option c, or the local agent for b) needs the `python-escpos` pip
    package. On Odoo.sh add a **root `requirements.txt`** with `python-escpos`
