@@ -21,8 +21,10 @@ What it does
   a second device can't re-send and duplicate the ticket. A *definite* failure
   (printer unreachable / out of paper / cover open) keeps the items pending so they
   are re-sent and never lost. The Retry/Reprint popup covers both.
-* **Double-send guard**: a per-order in-flight guard prevents rapid
-  double-clicks / parallel sends from printing the same ticket twice.
+* **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
+  double-clicks / parallel sends from printing the same ticket twice, and
+  auto-releases after 30s so a hung IoT print / order-sync can never freeze the
+  Send button until a page refresh (that refresh was what caused a duplicate).
 * **Concurrent-send merge**: when two devices send to the kitchen for the same
   order at the same moment, the server MERGES their sent-states (union of lines)
   instead of discarding the older one, so neither device re-sends and duplicates

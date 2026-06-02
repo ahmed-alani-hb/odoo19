@@ -81,8 +81,10 @@ patch(PosStore.prototype, {
      *    Reprint popup (printChanges) covers both: it reprints the same ticket
      *    without creating a new diff. (Core marks sent on every send but skips the
      *    server sync on failure, so its sent-state is lost on refresh → duplicate.)
-     *  - Fix B (double-send guard): concurrent/rapid sends for the same order are
-     *    coalesced.
+     *  - Fix B (self-healing double-send guard): concurrent/rapid sends for the same
+     *    order are coalesced; the guard auto-releases after 30s so a hung print/sync
+     *    can never freeze the Send button until a page refresh (and that refresh was
+     *    what dropped the local sent-state and caused a duplicate).
      * The printing/diff logic is identical to core. The restaurant "sent to the
      * kitchen" toast is replicated because we bypass the pos_restaurant override.
      */
@@ -93,9 +95,38 @@ patch(PosStore.prototype, {
                 severity: "warning",
                 message: "A send-to-kitchen for this order is already in progress; the duplicate call was ignored.",
             });
+            // Tell staff it is working, so the dead-looking Send button isn't spammed.
+            this.notification?.add(_t("Still sending the previous ticket — please wait…"), {
+                type: "warning",
+            });
             return;
         }
         this.sendingInPreparation.add(order.uuid);
+        // Self-healing guard: a hung IoT print or order-sync (a promise that never
+        // settles) must NEVER pin this guard forever. If it did, the Send button
+        // stays dead until a full page refresh — and that refresh is exactly what
+        // drops the locally-marked "sent" state and causes a duplicate on the next
+        // send. Auto-release after a bounded time so the order can be retried IN
+        // PLACE, where the local sent-state still suppresses re-printing the
+        // already-sent lines (so no refresh, no duplicate).
+        let guardReleased = false;
+        let guardTimer;
+        const releaseGuard = (reason) => {
+            if (guardReleased) {
+                return;
+            }
+            guardReleased = true;
+            clearTimeout(guardTimer);
+            this.sendingInPreparation.delete(order.uuid);
+            if (reason === "timeout") {
+                this.logRobustnessEvent("send_guard_timeout", order, {
+                    severity: "warning",
+                    message:
+                        "Send did not confirm within 30s; the in-flight guard was auto-released so the order is not frozen. Verify the kitchen ticket before re-sending.",
+                });
+            }
+        };
+        guardTimer = setTimeout(() => releaseGuard("timeout"), 30000);
         try {
             let categoryCount = [];
             if (!opts.cancelled) {
@@ -209,7 +240,7 @@ patch(PosStore.prototype, {
                 });
             }
         } finally {
-            this.sendingInPreparation.delete(order.uuid);
+            releaseGuard("done");
         }
     },
 
