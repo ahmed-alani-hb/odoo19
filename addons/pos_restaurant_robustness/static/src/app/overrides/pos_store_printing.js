@@ -45,12 +45,21 @@ patch(PosStore.prototype, {
 
     /**
      * @override
-     * Reimplements the core method so that the "mark as sent to the kitchen"
-     * step (`order.updateLastOrderChange()`) only runs when the print actually
-     * succeeded (Fix A), and so that concurrent/rapid sends are coalesced (Fix B).
-     * The printing/diff logic itself is kept identical to core. The restaurant
-     * "sent to the kitchen" toast is replicated because we bypass the
-     * pos_restaurant override on purpose.
+     * Reimplements the core method to fix duplicate kitchen tickets:
+     *  - Fix A (durable sent-state): every send marks the items "sent"
+     *    (`order.updateLastOrderChange()`) AND persists that to the server, even
+     *    when the print did not confirm. A false IoT timeout (the slow Odoo.sh
+     *    websocket fallback) reports "failed" although the ticket actually printed;
+     *    leaving the items pending — as core does (it marks sent locally but skips
+     *    the server sync when the print "failed"), and as our earlier version did
+     *    even more aggressively — is exactly what makes a page refresh or a second
+     *    device re-send and DUPLICATE the ticket. Genuine print failures stay
+     *    recoverable through the Retry/Reprint popup raised in printChanges()
+     *    (Reprint re-prints the same ticket without creating a new diff).
+     *  - Fix B (double-send guard): concurrent/rapid sends for the same order are
+     *    coalesced.
+     * The printing/diff logic is identical to core. The restaurant "sent to the
+     * kitchen" toast is replicated because we bypass the pos_restaurant override.
      */
     async sendOrderInPreparation(order, opts = {}) {
         // Fix B: coalesce concurrent/rapid sends for the same order.
@@ -118,32 +127,40 @@ patch(PosStore.prototype, {
                 }
             }
 
-            // Fix A: only advance `last_order_preparation_change` (mark items as
-            // "sent") when the kitchen print fully succeeded. On a partial or total
-            // failure the items stay pending so the (failed-printer-targeted) retry
-            // — or the next send — re-prints them instead of silently dropping the
-            // ticket. The non-printer / bypass path preserves stock behaviour.
-            const markedSent = !printerPath || printResult.allPrinted;
-            if (markedSent) {
-                order.updateLastOrderChange();
-                // Mirror core: only propagate to other devices once the changes are
-                // actually printed (and no preparation display is handling them).
-                if (printResult.allPrinted && !this.models["pos.prep.display"]?.length) {
+            // Fix A — durable sent-state. ALWAYS mark the items "sent to the
+            // kitchen" and persist that to the server, regardless of the print
+            // result. A false IoT timeout returns "failed" although the ticket
+            // actually printed; leaving items pending is what makes a refresh or a
+            // second device re-send and duplicate the ticket. Genuine failures stay
+            // recoverable via the Retry/Reprint popup raised in printChanges().
+            order.updateLastOrderChange();
+            if (!this.models["pos.prep.display"]?.length) {
+                try {
                     await this.syncAllOrders({ orders: [order] });
+                } catch (e) {
+                    // Offline / transient sync error: the sent-state is kept locally
+                    // (IndexedDB) and syncs later. Never break the send over this.
+                    this.logRobustnessEvent("sent_state_sync_deferred", order, {
+                        severity: "warning",
+                        message:
+                            "Sent-to-kitchen state kept locally; server sync deferred. " +
+                            (e?.message || String(e)),
+                    });
                 }
-            } else {
-                this.logRobustnessEvent("mark_sent_skipped", order, {
+            }
+            if (printerPath && !printResult.allPrinted) {
+                this.logRobustnessEvent("mark_sent_forced", order, {
                     severity: "warning",
                     message: printResult.anyPrinted
-                        ? "Partial kitchen print: items left pending for the failed printer(s)."
-                        : "Kitchen print failed: items left pending and will be re-sent.",
+                        ? "Partial kitchen print: items marked sent; reprint the failed printer(s) from the popup."
+                        : "Kitchen print did not confirm (likely a slow-fallback timeout): items marked sent to prevent a duplicate. Verify the ticket and use Reprint if it did not print.",
                 });
             }
 
             // Restaurant "sent to the kitchen" toast (replicated from the
-            // pos_restaurant override). Only shown when we actually marked the
-            // items as sent, so we never falsely claim success.
-            if (this.config.module_pos_restaurant && categoryCount.length && markedSent) {
+            // pos_restaurant override; we bypass it). Shown on every send, mirroring
+            // core which marks the order sent on every send.
+            if (this.config.module_pos_restaurant && categoryCount.length) {
                 const categorySummary = categoryCount
                     .map((cat) => `${cat.count} ${cat.name}`)
                     .join(_t(", "))

@@ -15,11 +15,13 @@ especially during rush hours.
 
 What it does
 ------------
-* **Missed kitchen tickets fix**: an order's items are marked "sent to the
-  kitchen" only when the print actually succeeds. Failed/partial prints stay
-  pending and are re-sent (via the existing retry), instead of being silently
-  lost.
-* **Duplicate prevention**: a per-order in-flight guard prevents rapid
+* **Duplicate kitchen tickets fix (durable sent-state)**: an order's items are
+  marked "sent to the kitchen" and that state is persisted to the server on every
+  send, even when the print times out/fails. This prevents a page refresh or a
+  second device from re-sending and printing a duplicate ticket (the common
+  failure when the POS falls back to the slow Odoo.sh websocket relay). Genuine
+  print failures stay recoverable via the Retry/Reprint popup.
+* **Double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice.
 * **Observability**: a ``pos.order.event`` log records kitchen-print and
   order-sync events (frontend and backend), with a list / pivot / graph view

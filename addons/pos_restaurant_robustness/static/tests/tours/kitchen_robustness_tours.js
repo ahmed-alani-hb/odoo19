@@ -23,7 +23,7 @@ function flushTelemetry() {
     ];
 }
 
-registry.category("web_tour.tours").add("test_kitchen_print_failure_keeps_pending", {
+registry.category("web_tour.tours").add("test_kitchen_print_failure_marks_sent", {
     steps: () =>
         [
             Chrome.startPoS(),
@@ -36,10 +36,11 @@ registry.category("web_tour.tours").add("test_kitchen_print_failure_keeps_pendin
             ProductScreen.clickOrderButton(),
             // The print fails -> a retry/warning dialog is shown; acknowledge it.
             Chrome.closePrintingWarning(),
-            // Fix A: because the print failed, the item must STILL be pending
-            // ("to order"), not silently marked as sent. (Stock POS would show
-            // orderlinesHaveNoChange() here.)
-            ProductScreen.orderlineIsToOrder("Coca-Cola"),
+            // Fix A (durable sent-state): even though the print failed/timed out, the
+            // item is marked SENT (no pending change), so a refresh or a second device
+            // cannot re-send and duplicate the ticket. A `mark_sent_forced` event is
+            // logged; genuine failures are handled via the Retry/Reprint popup.
+            ProductScreen.orderlinesHaveNoChange(),
             flushTelemetry(),
         ].flat(),
 });
