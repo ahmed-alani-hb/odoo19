@@ -23,12 +23,16 @@ What it does
   are re-sent and never lost. The Retry/Reprint popup covers both.
 * **Double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice.
+* **Concurrent-send merge**: when two devices send to the kitchen for the same
+  order at the same moment, the server MERGES their sent-states (union of lines)
+  instead of discarding the older one, so neither device re-sends and duplicates
+  the ticket. (Validate in staging with two devices before production.)
 * **Observability**: a ``pos.order.event`` log records kitchen-print and
   order-sync events (frontend and backend), with a list / pivot / graph view
   under *Point of Sale > Reporting > Kitchen Diagnostics*.
-* **Testing tools**: UI tours and a pure-Python concurrency simulator that
-  reproduce and guard the print-failure, double-send and multi-employee
-  table scenarios.
+* **Testing tools**: Hoot unit tests (kitchen-print failure classification,
+  durable sent-state, double-send guard) plus a pure-Python concurrency
+  simulator and event-log model tests.
 
 All changes are additive (JS ``patch()`` / Python ``_inherit`` + ``super()``);
 uninstalling the module fully restores stock behaviour.
@@ -43,12 +47,6 @@ uninstalling the module fully restores stock behaviour.
     'assets': {
         'point_of_sale._assets_pos': [
             'pos_restaurant_robustness/static/src/app/**/*',
-        ],
-        'web.assets_tests': [
-            'pos_restaurant_robustness/static/tests/tours/**/*',
-        ],
-        'point_of_sale.assets_debug': [
-            'pos_restaurant_robustness/static/tests/tours/**/*',
         ],
         'web.assets_unit_tests': [
             'pos_restaurant_robustness/static/tests/unit/**/*',

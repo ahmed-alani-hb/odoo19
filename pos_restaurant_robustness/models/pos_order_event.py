@@ -35,7 +35,8 @@ class PosOrderEvent(models.Model):
             ('sync_table_match_diff_order', 'Sync Matched Different Order (by table)'),
             ('order_lines_overwritten', 'Order Lines Overwritten'),
             ('order_consolidated', 'Order Consolidated/Deleted'),
-            ('prep_change_conflict', 'Preparation Change Conflict'),
+            ('prep_change_conflict', 'Preparation Change Conflict'),  # historical (pre-merge)
+            ('prep_change_merged', 'Preparation Change Merged (concurrent send)'),
         ],
         string='Event', required=True, index=True)
     severity = fields.Selection(
