@@ -5,6 +5,30 @@ import { RetryPrintPopup } from "@point_of_sale/app/components/popups/retry_prin
 import { logPosMessage } from "@point_of_sale/app/utils/pretty_console_log";
 import { _t } from "@web/core/l10n/translation";
 
+// Classify a *failed* print result. A "definite no-print" means the printer
+// certainly did NOT print (printer unreachable, out of paper, cover open, wrong
+// device) — so it is safe AND necessary to re-send those items. Anything else,
+// most importantly an IoT/timeout with no acknowledgement, *may* have printed, so
+// we must NOT auto-resend it — that is what produced duplicate kitchen tickets on
+// the slow Odoo.sh fallback.
+const DEFINITE_NO_PRINT_CODES = [
+    "PRINTER_NOT_REACHABLE",
+    "DEVICENOTFOUND",
+    "EPTR_COVER_OPEN",
+    "EPTR_REC_EMPTY",
+];
+export function isDefiniteNoPrint(result) {
+    const code = String(result?.errorCode || "").toUpperCase();
+    if (DEFINITE_NO_PRINT_CODES.some((c) => code.includes(c))) {
+        return true;
+    }
+    // Fallback for printers that don't set a machine-readable errorCode.
+    const body = String(result?.message?.body || "").toLowerCase();
+    return /not reachable|unreachable|cover open|out of paper|no paper|paper.*(empty|out)|device not found|printer.*off/.test(
+        body
+    );
+}
+
 patch(PosStore.prototype, {
     async setup() {
         // Per-order in-flight guard for sends to the kitchen (Fix B). Keyed on the
@@ -45,17 +69,18 @@ patch(PosStore.prototype, {
 
     /**
      * @override
-     * Reimplements the core method to fix duplicate kitchen tickets:
-     *  - Fix A (durable sent-state): every send marks the items "sent"
-     *    (`order.updateLastOrderChange()`) AND persists that to the server, even
-     *    when the print did not confirm. A false IoT timeout (the slow Odoo.sh
-     *    websocket fallback) reports "failed" although the ticket actually printed;
-     *    leaving the items pending — as core does (it marks sent locally but skips
-     *    the server sync when the print "failed"), and as our earlier version did
-     *    even more aggressively — is exactly what makes a page refresh or a second
-     *    device re-send and DUPLICATE the ticket. Genuine print failures stay
-     *    recoverable through the Retry/Reprint popup raised in printChanges()
-     *    (Reprint re-prints the same ticket without creating a new diff).
+     * Reimplements the core method to fix duplicate AND lost kitchen tickets:
+     *  - Fix A (smart sent-state): a send marks the items "sent"
+     *    (`order.updateLastOrderChange()`) and persists it to the server, UNLESS the
+     *    print was a *definite* total failure (printer unreachable / out of paper /
+     *    cover open — see isDefiniteNoPrint), in which case the items stay pending to
+     *    be re-sent (no lost order, and no duplicate since nothing printed). An
+     *    *ambiguous* failure — chiefly an IoT timeout on the slow Odoo.sh fallback,
+     *    which usually means the ticket DID print — is treated as sent, so a page
+     *    refresh or a second device cannot re-send and DUPLICATE it. The Retry/
+     *    Reprint popup (printChanges) covers both: it reprints the same ticket
+     *    without creating a new diff. (Core marks sent on every send but skips the
+     *    server sync on failure, so its sent-state is lost on refresh → duplicate.)
      *  - Fix B (double-send guard): concurrent/rapid sends for the same order are
      *    coalesced.
      * The printing/diff logic is identical to core. The restaurant "sent to the
@@ -127,40 +152,54 @@ patch(PosStore.prototype, {
                 }
             }
 
-            // Fix A — durable sent-state. ALWAYS mark the items "sent to the
-            // kitchen" and persist that to the server, regardless of the print
-            // result. A false IoT timeout returns "failed" although the ticket
-            // actually printed; leaving items pending is what makes a refresh or a
-            // second device re-send and duplicate the ticket. Genuine failures stay
-            // recoverable via the Retry/Reprint popup raised in printChanges().
-            order.updateLastOrderChange();
-            if (!this.models["pos.prep.display"]?.length) {
-                try {
-                    await this.syncAllOrders({ orders: [order] });
-                } catch (e) {
-                    // Offline / transient sync error: the sent-state is kept locally
-                    // (IndexedDB) and syncs later. Never break the send over this.
-                    this.logRobustnessEvent("sent_state_sync_deferred", order, {
+            // Fix A — smart sent-state. Mark the items "sent to the kitchen" and
+            // persist it to the server UNLESS the print was a *definite* total
+            // failure (printer unreachable / out of paper / cover open): then nothing
+            // printed, so we leave the items pending to be re-sent — no duplicate risk
+            // and, crucially, no lost order. An *ambiguous* failure (e.g. an IoT
+            // timeout, which usually means it DID print) is treated as sent, so a
+            // refresh or a second device can't re-send and duplicate it. Either way
+            // the Retry popup (raised in printChanges) lets staff reprint.
+            const definiteTotalFailure = printerPath && printResult.definiteTotalFailure;
+            const markedSent = !definiteTotalFailure;
+            if (markedSent) {
+                order.updateLastOrderChange();
+                if (!this.models["pos.prep.display"]?.length) {
+                    try {
+                        await this.syncAllOrders({ orders: [order] });
+                    } catch (e) {
+                        // Offline / transient sync error: the sent-state is kept
+                        // locally (IndexedDB) and syncs later. Never break the send.
+                        this.logRobustnessEvent("sent_state_sync_deferred", order, {
+                            severity: "warning",
+                            message:
+                                "Sent-to-kitchen state kept locally; server sync deferred. " +
+                                (e?.message || String(e)),
+                        });
+                    }
+                }
+                if (printerPath && !printResult.allPrinted) {
+                    this.logRobustnessEvent("mark_sent_forced", order, {
                         severity: "warning",
-                        message:
-                            "Sent-to-kitchen state kept locally; server sync deferred. " +
-                            (e?.message || String(e)),
+                        message: printResult.anyPrinted
+                            ? "Partial kitchen print: items marked sent; reprint the failed printer(s) from the popup."
+                            : "Kitchen print unconfirmed (likely a timeout): items marked sent to prevent a duplicate. Use Reprint if nothing printed.",
                     });
                 }
-            }
-            if (printerPath && !printResult.allPrinted) {
-                this.logRobustnessEvent("mark_sent_forced", order, {
+            } else {
+                // Definite failure: nothing printed. Keep items pending so the retry
+                // or the next send prints them — the order is never lost.
+                this.logRobustnessEvent("mark_sent_skipped", order, {
                     severity: "warning",
-                    message: printResult.anyPrinted
-                        ? "Partial kitchen print: items marked sent; reprint the failed printer(s) from the popup."
-                        : "Kitchen print did not confirm (likely a slow-fallback timeout): items marked sent to prevent a duplicate. Verify the ticket and use Reprint if it did not print.",
+                    message:
+                        "Definite kitchen print failure (printer unreachable / no paper / cover open): items left pending and will be re-sent. No duplicate risk.",
                 });
             }
 
             // Restaurant "sent to the kitchen" toast (replicated from the
-            // pos_restaurant override; we bypass it). Shown on every send, mirroring
-            // core which marks the order sent on every send.
-            if (this.config.module_pos_restaurant && categoryCount.length) {
+            // pos_restaurant override; we bypass it). Suppressed on a definite
+            // failure so we never falsely claim the order reached the kitchen.
+            if (this.config.module_pos_restaurant && categoryCount.length && markedSent) {
                 const categorySummary = categoryCount
                     .map((cat) => `${cat.count} ${cat.name}`)
                     .join(_t(", "))
@@ -177,13 +216,15 @@ patch(PosStore.prototype, {
     /**
      * @override
      * Same per-printer printing loop as core, but returns a richer result
-     * `{ anyPrinted, allPrinted, retryPrinters, failedNames }` instead of a bare
-     * boolean (callers that ignored the boolean are unaffected), logs the
-     * outcome, and makes the retry popup complete the "mark as sent" step when
-     * the previously-failed printers finally succeed.
+     * `{ anyPrinted, allPrinted, retryPrinters, failedNames, definiteTotalFailure }`
+     * instead of a bare boolean (callers that ignored the boolean are unaffected),
+     * classifies failures (definite no-print vs ambiguous/timeout), logs the
+     * outcome, and makes the retry popup complete the "mark as sent" step when the
+     * previously-failed printers finally succeed.
      */
     async printChanges(order, orderChange, reprint = false, printers = this.unwatched.printers) {
         let isPrinted = false;
+        let sawAmbiguousFailure = false; // a failure that may still have printed (e.g. a timeout)
         const unsuccessfulPrints = [];
         const retryPrinters = new Set();
 
@@ -212,6 +253,9 @@ patch(PosStore.prototype, {
                         unsuccessfulPrints.push(
                             printer.config.name + ": " + (result.message?.body || "")
                         );
+                        if (!isDefiniteNoPrint(result)) {
+                            sawAmbiguousFailure = true;
+                        }
                     } else if (result.warningCode) {
                         this.displayPrinterWarning(result, printer.config.name);
                     }
@@ -220,6 +264,12 @@ patch(PosStore.prototype, {
         }
 
         const allPrinted = isPrinted && unsuccessfulPrints.length === 0;
+        // A "definite total failure" = nothing printed AND every failure was a
+        // definite no-print. Only then is it safe to leave the items pending for an
+        // automatic re-send (the printer certainly didn't print, so re-sending can't
+        // duplicate, and not re-sending would lose the order).
+        const definiteTotalFailure =
+            !isPrinted && unsuccessfulPrints.length > 0 && !sawAmbiguousFailure;
         const failedNames = [...retryPrinters].map((p) => p.config.name);
 
         // Don't emit ok/fail telemetry for pure reprints (e.g. the ticket screen),
@@ -268,6 +318,6 @@ patch(PosStore.prototype, {
             });
         }
 
-        return { anyPrinted: isPrinted, allPrinted, retryPrinters, failedNames };
+        return { anyPrinted: isPrinted, allPrinted, retryPrinters, failedNames, definiteTotalFailure };
     },
 });

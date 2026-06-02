@@ -11,17 +11,17 @@ class TestKitchenPrintRobustness(TestRobustnessCommon):
     false-failure condition that used to cause duplicate tickets; we assert the
     items are now marked sent (durable) instead of left pending."""
 
-    def test_kitchen_print_failure_marks_sent(self):
+    def test_kitchen_print_definite_failure_keeps_pending(self):
         self.main_pos_config.open_ui()
-        self.start_pos_tour('test_kitchen_print_failure_marks_sent')
+        self.start_pos_tour('test_kitchen_print_definite_failure_keeps_pending')
         Event = self.env['pos.order.event']
         self.assertTrue(
             Event.search_count([('event_type', '=', 'kitchen_print_fail')]),
             "The failed kitchen print should have been logged")
         self.assertTrue(
-            Event.search_count([('event_type', '=', 'mark_sent_forced')]),
-            "On a failed/timed-out print the items must be marked sent to avoid a "
-            "duplicate (mark_sent_forced), not left pending")
+            Event.search_count([('event_type', '=', 'mark_sent_skipped')]),
+            "On a DEFINITE print failure (printer unreachable) the items must be "
+            "left pending (mark_sent_skipped) so the order is re-sent, not lost")
 
     def test_double_send_is_blocked(self):
         self.main_pos_config.open_ui()

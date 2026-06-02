@@ -8,26 +8,30 @@ file is modified**, and uninstalling the module fully restores stock behaviour.
 
 ## What it fixes
 
-### 1. Duplicate kitchen tickets (Fix A — durable sent-state)
-The real-world failure: when the POS can't reach the IoT directly and falls back
-to the slow Odoo.sh websocket relay, a kitchen print often **times out even though
-the ticket actually printed**. Stock POS marks the items sent only *locally* and
-skips saving it when the print "failed"; our earlier version left them fully
-pending. Either way the *"already sent"* fact is lost, so a page refresh or a
-second device **re-sends and prints a duplicate**.
+### 1. Duplicate **and** lost kitchen tickets (Fix A — smart sent-state)
+When the POS can't reach the IoT directly and falls back to the slow Odoo.sh
+websocket relay, a kitchen print often **times out even though the ticket actually
+printed**. Stock POS marks the items sent only *locally* and skips saving it when
+the print "failed", so the *"already sent"* fact is lost on a refresh / second
+device → **duplicate ticket**. Naively always-marking-sent would instead **lose** a
+ticket that genuinely never printed.
 
-This module now **durably records "sent to the kitchen" on every send** — it
-updates `last_order_preparation_change` *and* persists it to the server — so
-neither a refresh nor another device re-sends the same items. Genuine print
-failures stay recoverable through the **Retry/Reprint** popup, which reprints the
-same ticket without creating a new diff.
+This module **classifies the failure** and persists the sent-state accordingly:
 
-> ⚠️ **Trade-off:** a kitchen print that *times out* is indistinguishable from one
-> that genuinely *failed*, so this favours **never duplicating** over **never
-> missing**. If a printer is truly down, the items are marked sent and a Retry
-> popup is shown — staff must press **Reprint**. The reliable cure is to restore
-> the **direct LAN connection to the IoT** (`docs/IOT_PRINTING_TROUBLESHOOTING.md`)
-> so prints stop timing out and confirm reliably.
+| Print outcome | Action | Why |
+|---|---|---|
+| success | mark sent + persist | normal |
+| **ambiguous** failure (e.g. IoT **timeout** — usually printed) | mark sent + persist | a refresh / 2nd device can't re-send → **no duplicate** |
+| **definite** failure (printer **unreachable / no paper / cover open**) | keep items **pending** | nothing printed → re-sent on retry/next send → **no lost order** |
+
+Either way the **Retry/Reprint** popup is shown so staff can reprint (Reprint
+re-prints the same ticket without creating a new diff). The classifier is
+`isDefiniteNoPrint()`.
+
+> ⚠️ The reliable cure for the underlying timeouts is to restore the **direct LAN
+> connection to the IoT** (`docs/IOT_PRINTING_TROUBLESHOOTING.md`); then prints
+> confirm reliably and neither duplicates nor lost tickets occur — this is a
+> safety net for when they don't.
 
 ### 2. Double-send guard (Fix B)
 A per-order in-flight guard coalesces rapid double-clicks / parallel "send to
@@ -50,7 +54,8 @@ A `pos.order.event` log captures, from both the frontend and the backend:
 | `kitchen_send_attempt` / `kitchen_print_ok` | normal send / fully printed |
 | `kitchen_print_partial` / `kitchen_print_fail` | some / all printers failed |
 | `kitchen_print_retry` | user retried a failed printer |
-| `mark_sent_forced` | items marked sent despite a failed/timed-out print, to avoid a duplicate (Fix A) |
+| `mark_sent_forced` | ambiguous failure (e.g. timeout) → items marked sent to avoid a duplicate (Fix A) |
+| `mark_sent_skipped` | definite failure (unreachable/no paper) → items kept pending to avoid a lost order (Fix A) |
 | `sent_state_sync_deferred` | sent-state kept locally; server persist deferred (offline) |
 | `double_send_blocked` | a duplicate send was coalesced (Fix B) |
 | `sync_table_match_diff_order` | a sync matched a *different* order on the same table |

@@ -23,24 +23,35 @@ function flushTelemetry() {
     ];
 }
 
-registry.category("web_tour.tours").add("test_kitchen_print_failure_marks_sent", {
+registry.category("web_tour.tours").add("test_kitchen_print_definite_failure_keeps_pending", {
     steps: () =>
         [
             Chrome.startPoS(),
             Dialog.confirm("Open Register"),
             FloorScreen.clickTable("5"),
-            // Coca-Cola is routed to the (unreachable) "Preparation Printer", so the
-            // print will fail in the test environment.
+            {
+                // Force a DEFINITE no-print failure (printer unreachable) so the
+                // classification is deterministic regardless of the test printer.
+                content: "stub a definite (unreachable) print failure",
+                trigger: "body",
+                run: () => {
+                    window.posmodel.printOrderChanges = async () => ({
+                        successful: false,
+                        errorCode: "PRINTER_NOT_REACHABLE",
+                        message: { body: "The printer is not reachable." },
+                    });
+                },
+            },
             ProductScreen.clickDisplayedProduct("Coca-Cola", true),
             ProductScreen.orderlineIsToOrder("Coca-Cola"),
             ProductScreen.clickOrderButton(),
             // The print fails -> a retry/warning dialog is shown; acknowledge it.
             Chrome.closePrintingWarning(),
-            // Fix A (durable sent-state): even though the print failed/timed out, the
-            // item is marked SENT (no pending change), so a refresh or a second device
-            // cannot re-send and duplicate the ticket. A `mark_sent_forced` event is
-            // logged; genuine failures are handled via the Retry/Reprint popup.
-            ProductScreen.orderlinesHaveNoChange(),
+            // Fix A (smart sent-state): a DEFINITE failure means nothing printed, so
+            // the item must STAY pending ("to order") to be re-sent — the order is
+            // never lost — and a `mark_sent_skipped` event is logged. (An ambiguous
+            // timeout instead marks sent; that path is covered by the unit tests.)
+            ProductScreen.orderlineIsToOrder("Coca-Cola"),
             flushTelemetry(),
         ].flat(),
 });

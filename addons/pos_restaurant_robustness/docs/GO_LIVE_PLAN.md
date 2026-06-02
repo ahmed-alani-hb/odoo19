@@ -189,13 +189,14 @@ in the cloud — all before touching the restaurant.
       floors/tables → printers/stations → payment methods → employees/the shared
       user* (Appendix A). Re-enter any creyox printer settings by hand.
 - [ ] **A7. Reproduce & verify the 3 original failures using Diagnostics:**
-      - **Duplicate ticket (Fix A — durable sent-state):** force a print failure /
-        timeout (black-hole the printer IP) → confirm the items are still marked
-        **sent** and a `kitchen_print_fail` + `mark_sent_forced` event is logged,
-        then **refresh the page and re-open the table from a 2nd device** → confirm
-        **no duplicate** prints and the items do not re-send. The Retry popup
-        reprints the same ticket. *(If a printer is genuinely down, staff use
-        Reprint — see the README trade-off.)*
+      - **Duplicate vs lost ticket (Fix A — smart sent-state):**
+        - *Ambiguous failure* (the print doesn't confirm but paper still comes out,
+          e.g. a slow timeout): confirm items are marked **sent** + a
+          `kitchen_print_fail` + `mark_sent_forced` event, then **refresh / re-open
+          the table on a 2nd device** → **no duplicate** and no re-send.
+        - *Definite failure* (unplug the printer / black-hole the IP → "unreachable"):
+          confirm items stay **pending** + `mark_sent_skipped`; reprint via the popup
+          → the order is **not lost**.
       - **Duplicate (Fix B):** double-click/rapid-fire “Order” → confirm only one
         print and a `double_send_blocked` event.
       - **Disappearing orders (R5):** open the **same table** in two browser tabs on
@@ -299,10 +300,11 @@ window.
 ## PHASE D — Post-cutover monitoring (first 2 weeks)
 
 - [ ] **D1. Daily Diagnostics review.** Open Kitchen Diagnostics pivot (event type ×
-      hour). Track `kitchen_print_fail`, `mark_sent_forced`, `double_send_blocked`,
-      `order_consolidated`, `sync_table_match_diff_order`. Target: trending to ~0
-      (a high `mark_sent_forced` count means prints are still timing out → the IoT
-      LAN connection is not direct yet; see IOT_PRINTING_TROUBLESHOOTING.md).
+      hour). Track `kitchen_print_fail`, `mark_sent_forced`, `mark_sent_skipped`,
+      `double_send_blocked`, `order_consolidated`, `sync_table_match_diff_order`.
+      Target: trending to ~0 (a high `mark_sent_forced`/`mark_sent_skipped` count
+      means prints are still failing/timing out → the IoT LAN connection isn't
+      direct yet; see IOT_PRINTING_TROUBLESHOOTING.md).
 - [ ] **D2. Defined rollback triggers.** Pre-agree thresholds that force a fallback to
       17, e.g.: sustained internet outage with no failover; > X missed tickets/hour
       that staff can’t work around; data integrity doubt. If hit → execute C5
