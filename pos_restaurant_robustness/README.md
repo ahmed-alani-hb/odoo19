@@ -75,16 +75,15 @@ Frontend events are buffered client-side and flushed via a fire-and-forget
 ## Tests
 
 ```bash
-# Browser-independent tests (event-log model + concurrency simulator)
+# Python tests (event-log model + multi-employee concurrency simulator) — no browser
 ./odoo-bin -d <db> -u pos_restaurant_robustness --test-enable --stop-after-init \
   --test-tags=/pos_restaurant_robustness:TestSyncConcurrencySim,/pos_restaurant_robustness:TestPosOrderEventModel
-
-# Full suite, including the UI tours (requires a headless browser)
-./odoo-bin -d <db> -u pos_restaurant_robustness --test-enable --stop-after-init \
-  --test-tags=/pos_restaurant_robustness
 ```
 
-The Hoot unit tests (`static/tests/unit/**`) run in the JS unit-test runner.
+The JS behaviour — kitchen-print **failure classification**, **durable sent-state**,
+and the **double-send guard** — is covered by the Hoot unit tests in
+`static/tests/unit/**`, which run in the JS unit-test runner (no fragile,
+environment-dependent browser tours).
 
 ## Reversibility
 Every change is additive (a new service + `patch()`es + `_inherit` hooks that
