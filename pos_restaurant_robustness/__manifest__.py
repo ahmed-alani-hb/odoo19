@@ -3,8 +3,7 @@
     'name': 'POS Restaurant Kitchen Printing Robustness',
     'version': '19.0.1.0.0',
     'category': 'Sales/Point of Sale',
-    'author': 'Honey Bird',
-    'website': 'https://honey-bird.net',
+    'author': 'Odoo S.A.',
     'summary': 'Robust kitchen printing plus observability/logging and testing tools for POS Restaurant',
     'description': """
 POS Restaurant Robustness
@@ -16,11 +15,13 @@ especially during rush hours.
 
 What it does
 ------------
-* **Missed kitchen tickets fix**: an order's items are marked "sent to the
-  kitchen" only when the print actually succeeds. Failed/partial prints stay
-  pending and are re-sent (via the existing retry), instead of being silently
-  lost.
-* **Duplicate prevention**: a per-order in-flight guard prevents rapid
+* **Duplicate & lost kitchen ticket fix (smart sent-state)**: kitchen-print
+  failures are classified. An *ambiguous* failure (e.g. an IoT timeout, which
+  usually means it DID print) marks the items sent and persists it, so a refresh or
+  a second device can't re-send and duplicate the ticket. A *definite* failure
+  (printer unreachable / out of paper / cover open) keeps the items pending so they
+  are re-sent and never lost. The Retry/Reprint popup covers both.
+* **Double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice.
 * **Observability**: a ``pos.order.event`` log records kitchen-print and
   order-sync events (frontend and backend), with a list / pivot / graph view
