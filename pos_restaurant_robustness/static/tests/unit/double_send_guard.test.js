@@ -1,5 +1,5 @@
 import { describe, test, expect } from "@odoo/hoot";
-import { Deferred } from "@odoo/hoot-mock";
+import { Deferred, runAllTimers } from "@odoo/hoot-mock";
 import { setupPosEnv, getFilledOrder } from "@point_of_sale/../tests/unit/utils";
 import { definePosModels } from "@point_of_sale/../tests/unit/data/generate_model_definitions";
 
@@ -43,5 +43,29 @@ describe("pos_restaurant_robustness: double-send guard (Fix B)", () => {
         });
         await store.sendOrderInPreparation(order);
         expect(printCalls).toBe(2);
+    });
+
+    test("a hung send auto-releases the guard after the timeout (no page refresh needed)", async () => {
+        const store = await setupPosEnv();
+        const order = await getFilledOrder(store);
+        store.syncAllOrders = async () => {};
+        store.notification = { add() {} };
+
+        // First send hangs forever inside printChanges (a stuck IoT print / sync).
+        const deferred = new Deferred();
+        store.printChanges = async () => {
+            await deferred;
+            return { anyPrinted: true, allPrinted: true, retryPrinters: new Set(), failedNames: [] };
+        };
+
+        store.sendOrderInPreparation(order); // not awaited: stays hung in-flight
+        expect(store.sendingInPreparation.has(order.uuid)).toBe(true);
+
+        // The 30s safety timer must release the guard even though the send is still
+        // hung — otherwise the Send button stays frozen until a full page refresh.
+        await runAllTimers();
+        expect(store.sendingInPreparation.has(order.uuid)).toBe(false);
+
+        deferred.resolve(); // clean up the hung promise
     });
 });
