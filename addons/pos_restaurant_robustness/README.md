@@ -33,9 +33,15 @@ re-prints the same ticket without creating a new diff). The classifier is
 > confirm reliably and neither duplicates nor lost tickets occur — this is a
 > safety net for when they don't.
 
-### 2. Double-send guard (Fix B)
+### 2. Self-healing double-send guard (Fix B)
 A per-order in-flight guard coalesces rapid double-clicks / parallel "send to
-kitchen" calls for the same order, so the same ticket can't be printed twice.
+kitchen" calls for the same order, so the same ticket can't be printed twice. The
+guard **auto-releases after 30s** so a hung IoT print or order-sync (a promise that
+never settles) can never **freeze the Send button until a page refresh** — and that
+refresh is exactly what dropped the local "sent" state and caused a duplicate.
+Retrying in place keeps the local sent-state, so already-sent lines aren't
+re-printed. While a send is in progress a further press shows *"Still sending the
+previous ticket — please wait…"*; an auto-release is logged as `send_guard_timeout`.
 
 ### 3. Duplicate tickets from concurrent two-device sends (Fix C — prep-change merge)
 When two devices send to the kitchen at the **same moment**, core's
@@ -73,6 +79,7 @@ A `pos.order.event` log captures, from both the frontend and the backend:
 | `mark_sent_forced` | ambiguous failure (e.g. timeout) → items marked sent to avoid a duplicate (Fix A) |
 | `mark_sent_skipped` | definite failure (unreachable/no paper) → items kept pending to avoid a lost order (Fix A) |
 | `sent_state_sync_deferred` | sent-state kept locally; server persist deferred (offline) |
+| `send_guard_timeout` | a hung send's in-flight guard was auto-released after 30s (Fix B) so Send isn't frozen |
 | `prep_change_merged` | concurrent two-device kitchen states were merged to avoid a duplicate (Fix C) |
 | `double_send_blocked` | a duplicate send was coalesced (Fix B) |
 | `sync_table_match_diff_order` | a sync matched a *different* order on the same table |

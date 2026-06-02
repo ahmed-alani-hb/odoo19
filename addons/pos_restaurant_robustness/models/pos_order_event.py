@@ -31,6 +31,7 @@ class PosOrderEvent(models.Model):
             ('mark_sent_forced', 'Mark-Sent Forced (avoid duplicate)'),
             ('sent_state_sync_deferred', 'Sent-State Sync Deferred (offline)'),
             ('double_send_blocked', 'Double Send Blocked'),
+            ('send_guard_timeout', 'Send Guard Auto-Released (hung send)'),
             # --- backend/frontend: multi-employee concurrency (observed only) ---
             ('sync_table_match_diff_order', 'Sync Matched Different Order (by table)'),
             ('order_lines_overwritten', 'Order Lines Overwritten'),
