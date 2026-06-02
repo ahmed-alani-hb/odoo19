@@ -98,40 +98,85 @@ class PosOrder(models.Model):
             self._log_robustness_event(event_vals)
         return result
 
-    def _ensure_to_keep_last_preparation_change(self, vals):
-        conflicts = self.env['pos.order']
+    @api.model
+    def _merge_preparation_changes(self, server_raw, local_raw):
+        """Union two ``last_order_preparation_change`` blobs so that no device's
+        already-sent kitchen lines are lost.
+
+        Core keeps the *newer* blob and DISCARDS the older one when two devices
+        send to the kitchen at the same moment; the discarded device then loses
+        its 'already sent' state and re-sends on the next refresh -> duplicate
+        ticket. Here we keep the union of the ``lines`` from both blobs (for a
+        line present in both, the entry with the greater sent quantity, i.e. the
+        more-complete sent state), stamped with a fresh ``serverDate``.
+
+        Returns the merged JSON string, or ``None`` when the inputs are not both
+        valid kitchen states (the caller then keeps core's behaviour).
+        """
         try:
-            raw_local = vals.get('last_order_preparation_change')
-            if raw_local:
-                local_change = json.loads(raw_local)
-                local_meta = local_change.get('metadata') if isinstance(local_change, dict) else None
-                if local_meta and local_meta.get('serverDate'):
-                    local_date = fields.Datetime.from_string(local_meta.get('serverDate'))
-                    for record in self:
-                        if not record.last_order_preparation_change:
-                            continue
-                        change = json.loads(record.last_order_preparation_change)
-                        meta = change.get('metadata') if isinstance(change, dict) else None
-                        if meta and meta.get('serverDate'):
-                            server_date = fields.Datetime.from_string(meta.get('serverDate'))
-                            if server_date and local_date and server_date > local_date:
-                                conflicts |= record
-        except Exception:
-            conflicts = self.env['pos.order']
-            _logger.exception("pos_restaurant_robustness: prep-change conflict scan failed")
-        result = super()._ensure_to_keep_last_preparation_change(vals)
-        for record in conflicts:
-            self._log_robustness_event({
-                'event_type': 'prep_change_conflict',
-                'severity': 'warning',
-                'source': 'backend',
-                'order_uuid': record.uuid,
-                'order_id': record.id,
-                'pos_reference': record.pos_reference,
-                'table_id': record.table_id.id if 'table_id' in record._fields else False,
-                'config_id': record.config_id.id,
-                'session_id': record.session_id.id,
-                'device_identifier': self._device_identifier(),
-                'message': "Incoming preparation change was outdated; the server version was kept (possible lost kitchen update).",
-            })
-        return result
+            server_change = json.loads(server_raw or '{}')
+            local_change = json.loads(local_raw or '{}')
+        except (TypeError, ValueError):
+            return None
+        if not (isinstance(server_change, dict) and server_change.get('metadata')):
+            return None
+        if not (isinstance(local_change, dict) and local_change.get('metadata')):
+            return None
+
+        merged_lines = dict(server_change.get('lines') or {})
+        for key, line in (local_change.get('lines') or {}).items():
+            existing = merged_lines.get(key)
+            if existing is None or (line.get('quantity') or 0) > (existing.get('quantity') or 0):
+                merged_lines[key] = line
+
+        server_date = fields.Datetime.from_string(server_change['metadata'].get('serverDate'))
+        local_date = fields.Datetime.from_string(local_change['metadata'].get('serverDate'))
+        # Base the non-line fields (notes, sittingMode) on whichever side is newer;
+        # always union the lines and stamp a fresh serverDate.
+        base = local_change if (local_date and server_date and local_date >= server_date) else server_change
+        merged = dict(base)
+        merged['lines'] = merged_lines
+        merged['metadata'] = {'serverDate': fields.Datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        return json.dumps(merged)
+
+    def _ensure_to_keep_last_preparation_change(self, vals):
+        """Merge concurrent kitchen sent-state instead of discarding the older
+        copy (which is what makes a second device re-send and duplicate the
+        ticket). Falls back to core's keep-newer behaviour on anything we can't
+        safely merge, and never raises."""
+        incoming_raw = vals.get('last_order_preparation_change')
+        for record in self:
+            try:
+                if not record.last_order_preparation_change:
+                    continue
+                merged = self._merge_preparation_changes(record.last_order_preparation_change, incoming_raw)
+                if merged is None:
+                    # Not both valid kitchen states: mirror core — when the server
+                    # has a kitchen state and the incoming one doesn't, keep the
+                    # server's so it isn't wiped.
+                    server_change = json.loads(record.last_order_preparation_change or '{}')
+                    if isinstance(server_change, dict) and server_change.get('metadata'):
+                        vals['last_order_preparation_change'] = record.last_order_preparation_change
+                    continue
+                before = len(json.loads(record.last_order_preparation_change).get('lines') or {})
+                after = len(json.loads(merged).get('lines') or {})
+                vals['last_order_preparation_change'] = merged
+                if after > before:
+                    self._log_robustness_event({
+                        'event_type': 'prep_change_merged',
+                        'severity': 'warning',
+                        'source': 'backend',
+                        'order_uuid': record.uuid,
+                        'order_id': record.id,
+                        'pos_reference': record.pos_reference,
+                        'table_id': record.table_id.id if 'table_id' in record._fields else False,
+                        'config_id': record.config_id.id,
+                        'session_id': record.session_id.id,
+                        'device_identifier': self._device_identifier(),
+                        'message': "Merged concurrent kitchen sent-state (%d -> %d lines) "
+                                   "to avoid a duplicate re-send." % (before, after),
+                    })
+            except Exception:
+                _logger.exception("pos_restaurant_robustness: prep-change merge failed; keeping server copy")
+                vals['last_order_preparation_change'] = record.last_order_preparation_change
+        return

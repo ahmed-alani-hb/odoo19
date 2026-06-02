@@ -23,6 +23,10 @@ What it does
   are re-sent and never lost. The Retry/Reprint popup covers both.
 * **Double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice.
+* **Concurrent-send merge**: when two devices send to the kitchen for the same
+  order at the same moment, the server MERGES their sent-states (union of lines)
+  instead of discarding the older one, so neither device re-sends and duplicates
+  the ticket. (Validate in staging with two devices before production.)
 * **Observability**: a ``pos.order.event`` log records kitchen-print and
   order-sync events (frontend and backend), with a list / pivot / graph view
   under *Point of Sale > Reporting > Kitchen Diagnostics*.

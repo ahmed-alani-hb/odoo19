@@ -37,7 +37,23 @@ re-prints the same ticket without creating a new diff). The classifier is
 A per-order in-flight guard coalesces rapid double-clicks / parallel "send to
 kitchen" calls for the same order, so the same ticket can't be printed twice.
 
-### 3. Disappearing orders on shared tables (observed, not changed)
+### 3. Duplicate tickets from concurrent two-device sends (Fix C — prep-change merge)
+When two devices send to the kitchen at the **same moment**, core's
+`_ensure_to_keep_last_preparation_change` keeps the *newer* sent-state and
+**discards the older one** (it logs *"Preparation changes were outdated"*). The
+discarded device loses its "already sent" record and **re-sends on the next
+refresh → duplicate ticket**. This module **merges** the two states instead —
+the union of sent lines, keeping the greater sent quantity per line
+(`_merge_preparation_changes`, unit-tested) — so neither device's printed items
+are lost and nothing gets re-sent. Logged as `prep_change_merged`.
+
+> ⚠️ This addresses the **same-order** concurrent case. If two devices collide on
+> **different** tables, the symptom is a stalled sync (not a prep-change
+> conflict) and the lever is **Odoo.sh worker count** / reducing load on the PC
+> that also hosts the IoT — see GO_LIVE_PLAN.md. **Validate this merge in an
+> Odoo.sh staging build with two devices before relying on it in production.**
+
+### 4. Disappearing orders on shared tables (observed, not changed)
 When two employees open the same table, Odoo merges/overwrites orders. This
 module **does not change** that logic yet — it **measures** it: every table
 match, overwrite, consolidation and preparation-change conflict is logged so you
@@ -57,6 +73,7 @@ A `pos.order.event` log captures, from both the frontend and the backend:
 | `mark_sent_forced` | ambiguous failure (e.g. timeout) → items marked sent to avoid a duplicate (Fix A) |
 | `mark_sent_skipped` | definite failure (unreachable/no paper) → items kept pending to avoid a lost order (Fix A) |
 | `sent_state_sync_deferred` | sent-state kept locally; server persist deferred (offline) |
+| `prep_change_merged` | concurrent two-device kitchen states were merged to avoid a duplicate (Fix C) |
 | `double_send_blocked` | a duplicate send was coalesced (Fix B) |
 | `sync_table_match_diff_order` | a sync matched a *different* order on the same table |
 | `order_lines_overwritten` | an existing order's lines were rewritten during a sync |
