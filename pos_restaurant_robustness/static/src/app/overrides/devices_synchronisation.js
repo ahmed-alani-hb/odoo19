@@ -12,9 +12,15 @@ import { patch } from "@web/core/utils/patch";
 patch(DevicesSynchronisation.prototype, {
     async processDynamicRecords(dynamicRecords) {
         const before = this._robustnessSnapshotTableOrders();
+        const prepBefore = this._robustnessSnapshotPrepDates();
         const result = await super.processDynamicRecords(...arguments);
         try {
             this._robustnessDetectConsolidation(before);
+        } catch {
+            // never break a sync because of logging
+        }
+        try {
+            this._robustnessDetectSentStateSync(prepBefore);
         } catch {
             // never break a sync because of logging
         }
@@ -51,6 +57,40 @@ patch(DevicesSynchronisation.prototype, {
                         after: afterUuids,
                         removed,
                     }),
+                });
+            }
+        }
+    },
+
+    // --- Cross-device kitchen sent-state propagation (observability only) ---
+    // The "sent to the kitchen" state of an order is its `last_order_preparation_change`
+    // (stamped with a serverDate). When one device sends, the others should pick up
+    // the new state on the next sync so the items stop showing as "not sent". We
+    // snapshot the per-order serverDate before/after a sync and log when it advances
+    // from another device, so the propagation (or its absence) becomes measurable.
+    _robustnessSnapshotPrepDates() {
+        try {
+            return this.models["pos.order"].reduce((acc, order) => {
+                if (!order.finalized) {
+                    acc[order.uuid] = order.last_order_preparation_change?.metadata?.serverDate || "";
+                }
+                return acc;
+            }, {});
+        } catch {
+            return {};
+        }
+    },
+
+    _robustnessDetectSentStateSync(before) {
+        const after = this._robustnessSnapshotPrepDates();
+        for (const [uuid, serverDate] of Object.entries(after)) {
+            // Only orders that already existed locally and whose sent-state changed.
+            if (before[uuid] !== undefined && before[uuid] !== serverDate) {
+                const order = this.models["pos.order"].getBy("uuid", uuid);
+                this.pos.logRobustnessEvent?.("sent_state_received", order, {
+                    message: `Kitchen sent-state updated from another device (serverDate ${
+                        before[uuid] || "∅"
+                    } -> ${serverDate || "∅"}).`,
                 });
             }
         }

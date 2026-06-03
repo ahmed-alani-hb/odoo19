@@ -27,8 +27,10 @@ class PosOrderEvent(models.Model):
             ('kitchen_print_partial', 'Kitchen Print Partial'),
             ('kitchen_print_fail', 'Kitchen Print Failed'),
             ('kitchen_print_retry', 'Kitchen Print Retry'),
+            ('kitchen_send_dispatched', 'Kitchen Send Dispatched (sent + printing in background)'),
             ('mark_sent_skipped', 'Mark-Sent Skipped (print failed)'),  # historical (pre-durable-sent)
             ('mark_sent_forced', 'Mark-Sent Forced (avoid duplicate)'),
+            ('mark_sent_rolled_back', 'Mark-Sent Rolled Back (definite print failure)'),
             ('sent_state_sync_deferred', 'Sent-State Sync Deferred (offline)'),
             ('double_send_blocked', 'Double Send Blocked'),
             ('send_guard_timeout', 'Send Guard Auto-Released (hung send)'),
@@ -36,6 +38,7 @@ class PosOrderEvent(models.Model):
             ('sync_table_match_diff_order', 'Sync Matched Different Order (by table)'),
             ('order_lines_overwritten', 'Order Lines Overwritten'),
             ('order_consolidated', 'Order Consolidated/Deleted'),
+            ('sent_state_received', 'Kitchen Sent-State Received (from another device)'),
             ('prep_change_conflict', 'Preparation Change Conflict'),  # historical (pre-merge)
             ('prep_change_merged', 'Preparation Change Merged (concurrent send)'),
         ],
