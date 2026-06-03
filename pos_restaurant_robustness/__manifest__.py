@@ -29,6 +29,10 @@ What it does
   order at the same moment, the server MERGES their sent-states (union of lines)
   instead of discarding the older one, so neither device re-sends and duplicates
   the ticket. (Validate in staging with two devices before production.)
+* **"Close table after sending" option**: a Settings toggle (Point of Sale,
+  restaurant mode) controlling whether the POS returns to the floor (closes the
+  table) after an order is sent. Turn it off to keep the table open for adding more
+  items. Default on (current behaviour).
 * **Observability**: a ``pos.order.event`` log records kitchen-print and
   order-sync events (frontend and backend), with a list / pivot / graph view
   under *Point of Sale > Reporting > Kitchen Diagnostics*.
@@ -42,6 +46,7 @@ uninstalling the module fully restores stock behaviour.
     'depends': ['pos_restaurant'],
     'data': [
         'security/ir.model.access.csv',
+        'views/res_config_settings_views.xml',
         'views/pos_order_event_views.xml',
         'views/pos_order_event_menus.xml',
         'data/pos_order_event_data.xml',

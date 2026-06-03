@@ -103,6 +103,12 @@ complaint end-to-end. Events older than 90 days are purged by a daily cron
 Frontend events are buffered client-side and flushed via a fire-and-forget
 `silentCall`, so logging can never delay or break a kitchen ticket.
 
+## Configuration
+**Settings → Point of Sale → (restaurant mode) → "Close Table After Sending"**
+(`pos.config.close_table_after_order`, default **on**). When on, the POS returns to
+the floor screen after an order is sent (current behaviour). Turn it **off** to keep
+the table open after sending, so staff can keep adding items to the same table.
+
 ## Tests
 
 ```bash
