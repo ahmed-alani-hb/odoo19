@@ -29,6 +29,14 @@ What it does
   order at the same moment, the server MERGES their sent-states (union of lines)
   instead of discarding the older one, so neither device re-sends and duplicates
   the ticket. (Validate in staging with two devices before production.)
+* **Snappy, multi-device-correct Send**: a normal send marks the order sent and
+  pushes that state to the server SYNCHRONOUSLY (before the table closes), then
+  prints the kitchen ticket in the BACKGROUND. The table closes / Send button
+  frees immediately without waiting on the IoT printer round-trip, while a second
+  device viewing the same table sees the items as sent right away (instead of
+  "not sent" until the print finished — which risked a duplicate re-send). If the
+  background print is a *definite* failure the sent-state is rolled back so the
+  items are re-sent (no lost ticket). (Validate in staging with two devices.)
 * **"Close table after sending" option**: a Settings toggle (Point of Sale,
   restaurant mode) controlling whether the POS returns to the floor (closes the
   table) after an order is sent. Turn it off to keep the table open for adding more

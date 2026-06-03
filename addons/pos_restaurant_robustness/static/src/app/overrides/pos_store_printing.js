@@ -129,6 +129,9 @@ patch(PosStore.prototype, {
             }
         };
         guardTimer = setTimeout(() => releaseGuard("timeout"), 30000);
+        // When set, the kitchen ticket prints in the BACKGROUND and releases the
+        // guard once it settles; the synchronous paths release it in the `finally`.
+        let backgroundPrint = null;
         try {
             let categoryCount = [];
             if (!opts.cancelled) {
@@ -137,116 +140,202 @@ patch(PosStore.prototype, {
 
             this.logRobustnessEvent("kitchen_send_attempt", order);
 
-            let printResult = { anyPrinted: false, allPrinted: false };
-            let printerPath = false;
+            const printerPath = Boolean(
+                this.config.printerCategories.size && !opts.byPassPrint
+            );
 
-            if (this.config.printerCategories.size && !opts.byPassPrint) {
-                printerPath = true;
-                try {
-                    let reprint = false;
-                    let orderChange = changesToOrder(
-                        order,
-                        this.config.printerCategories,
-                        opts.cancelled
-                    );
+            // Compute what to print (identical to core). `orderChange` is the diff;
+            // `reprint` means there were no new changes so we reprint the last ticket.
+            let reprint = false;
+            let orderChange = null;
+            if (printerPath) {
+                orderChange = changesToOrder(
+                    order,
+                    this.config.printerCategories,
+                    opts.cancelled
+                );
 
-                    if (
-                        !orderChange.new.length &&
-                        !orderChange.cancelled.length &&
-                        !orderChange.noteUpdate.length &&
-                        !orderChange.internal_note &&
-                        !orderChange.general_customer_note &&
-                        order.uiState.lastPrints
-                    ) {
-                        orderChange = [order.uiState.lastPrints.at(-1)];
-                        reprint = true;
-                    } else {
-                        order.uiState.lastPrints.push(orderChange);
-                        orderChange = [orderChange];
+                if (
+                    !orderChange.new.length &&
+                    !orderChange.cancelled.length &&
+                    !orderChange.noteUpdate.length &&
+                    !orderChange.internal_note &&
+                    !orderChange.general_customer_note &&
+                    order.uiState.lastPrints
+                ) {
+                    orderChange = [order.uiState.lastPrints.at(-1)];
+                    reprint = true;
+                } else {
+                    order.uiState.lastPrints.push(orderChange);
+                    orderChange = [orderChange];
+                }
+
+                if (reprint && opts.orderDone) {
+                    return;
+                }
+            }
+
+            // Reprint / cancellation / no-printer keep the original AWAITED flow:
+            // these are rare and not on the snappy table-close path, so we don't
+            // reorder them — the sent-state is decided from the real print result.
+            if (!printerPath || reprint || opts.cancelled) {
+                let printResult = { anyPrinted: false, allPrinted: false };
+                if (printerPath) {
+                    try {
+                        printResult = await this.printChanges(order, orderChange, reprint);
+                    } catch (e) {
+                        this._robustnessLogPrintException(order, e);
+                        printResult = { anyPrinted: false, allPrinted: false };
                     }
-
-                    if (reprint && opts.orderDone) {
-                        return;
-                    }
-                    printResult = await this.printChanges(order, orderChange, reprint);
-                } catch (e) {
-                    logPosMessage(
-                        "Store",
-                        "sendOrderInPreparation",
-                        "Failed in printing the changes in the order",
-                        CONSOLE_COLOR,
-                        [e]
-                    );
-                    this.logRobustnessEvent("kitchen_print_fail", order, {
-                        severity: "error",
-                        message: "Exception while printing: " + (e?.message || String(e)),
-                    });
-                    printResult = { anyPrinted: false, allPrinted: false };
                 }
+                this._robustnessApplySentState(order, printResult, printerPath, categoryCount);
+                return;
             }
 
-            // Fix A — smart sent-state. Mark the items "sent to the kitchen" and
-            // persist it to the server UNLESS the print was a *definite* total
-            // failure (printer unreachable / out of paper / cover open): then nothing
-            // printed, so we leave the items pending to be re-sent — no duplicate risk
-            // and, crucially, no lost order. An *ambiguous* failure (e.g. an IoT
-            // timeout, which usually means it DID print) is treated as sent, so a
-            // refresh or a second device can't re-send and duplicate it. Either way
-            // the Retry popup (raised in printChanges) lets staff reprint.
-            const definiteTotalFailure = printerPath && printResult.definiteTotalFailure;
-            const markedSent = !definiteTotalFailure;
-            if (markedSent) {
-                order.updateLastOrderChange();
-                if (!this.models["pos.prep.display"]?.length) {
-                    // Persist the sent-state to the server in the BACKGROUND (not
-                    // awaited) so the Send button resolves and the table closes right
-                    // after the print is confirmed, instead of waiting for the Odoo.sh
-                    // round-trip. The local sent-state is already set above, so the
-                    // kitchen state is correct and a page refresh restores it from
-                    // IndexedDB; the sync starts at the same instant either way (so
-                    // cross-device timing is unchanged), and the POS pending-order
-                    // queue retries it if it fails.
-                    this.syncAllOrders({ orders: [order] }).catch((e) => {
-                        this.logRobustnessEvent("sent_state_sync_deferred", order, {
-                            severity: "warning",
-                            message:
-                                "Background sent-state sync failed; kept locally, will retry. " +
-                                (e?.message || String(e)),
-                        });
-                    });
-                }
-                if (printerPath && !printResult.allPrinted) {
-                    this.logRobustnessEvent("mark_sent_forced", order, {
-                        severity: "warning",
-                        message: printResult.anyPrinted
-                            ? "Partial kitchen print: items marked sent; reprint the failed printer(s) from the popup."
-                            : "Kitchen print unconfirmed (likely a timeout): items marked sent to prevent a duplicate. Use Reprint if nothing printed.",
-                    });
-                }
-            } else {
-                // Definite failure: nothing printed. Keep items pending so the retry
-                // or the next send prints them — the order is never lost.
-                this.logRobustnessEvent("mark_sent_skipped", order, {
-                    severity: "warning",
-                    message:
-                        "Definite kitchen print failure (printer unreachable / no paper / cover open): items left pending and will be re-sent. No duplicate risk.",
-                });
-            }
-
-            // Restaurant "sent to the kitchen" toast (replicated from the
-            // pos_restaurant override; we bypass it). Suppressed on a definite
-            // failure so we never falsely claim the order reached the kitchen.
-            if (this.config.module_pos_restaurant && categoryCount.length && markedSent) {
-                const categorySummary = categoryCount
-                    .map((cat) => `${cat.count} ${cat.name}`)
-                    .join(_t(", "))
-                    .replace(/, ([^,]*)$/, _t(" and $1"));
-                this.notification.add(_t("%s, sent to the kitchen", categorySummary), {
-                    type: "success",
-                });
-            }
+            // Normal new send — snappy AND multi-device-correct.
+            // 1) Snapshot the pre-send kitchen state so we can roll back if the
+            //    background print turns out to be a definite total failure.
+            const prevPrepChange = JSON.parse(
+                JSON.stringify(order.last_order_preparation_change)
+            );
+            // 2) Mark the order sent and push it to the server NOW (synchronously),
+            //    BEFORE this method returns. This is what lets the caller close the
+            //    table / free the Send button immediately while OTHER DEVICES viewing
+            //    the same table see the items as sent right away (instead of "not
+            //    sent" until the printer round-trip finished — which risked a
+            //    duplicate re-send from the second device).
+            order.updateLastOrderChange();
+            this._robustnessPushSentState(order);
+            this._robustnessSentToKitchenToast(order, categoryCount);
+            this.logRobustnessEvent("kitchen_send_dispatched", order, {
+                message:
+                    "Order marked sent and pushed to the server; the kitchen ticket is printing in the background.",
+            });
+            // 3) Print the ticket in the BACKGROUND; reconcile (roll back on a
+            //    definite failure) when it settles, then release the in-flight guard.
+            backgroundPrint = this._robustnessPrintAndReconcile(
+                order,
+                orderChange,
+                prevPrepChange
+            ).finally(() => releaseGuard("done"));
         } finally {
-            releaseGuard("done");
+            if (!backgroundPrint) {
+                releaseGuard("done");
+            }
+        }
+    },
+
+    /** Persist the order's (already-set) sent-state to the server in the
+     * background so other devices converge. Skipped when a preparation display is
+     * in use (it owns that state). Never blocks the caller and never throws. */
+    _robustnessPushSentState(order) {
+        if (this.models["pos.prep.display"]?.length) {
+            return;
+        }
+        this.syncAllOrders({ orders: [order] }).catch((e) => {
+            this.logRobustnessEvent("sent_state_sync_deferred", order, {
+                severity: "warning",
+                message:
+                    "Background sent-state sync failed; kept locally, will retry. " +
+                    (e?.message || String(e)),
+            });
+        });
+    },
+
+    /** Restaurant "X, sent to the kitchen" toast (replicated from the
+     * pos_restaurant override, which we bypass). */
+    _robustnessSentToKitchenToast(order, categoryCount) {
+        if (this.config.module_pos_restaurant && categoryCount.length) {
+            const categorySummary = categoryCount
+                .map((cat) => `${cat.count} ${cat.name}`)
+                .join(_t(", "))
+                .replace(/, ([^,]*)$/, _t(" and $1"));
+            this.notification.add(_t("%s, sent to the kitchen", categorySummary), {
+                type: "success",
+            });
+        }
+    },
+
+    _robustnessLogPrintException(order, e) {
+        logPosMessage(
+            "Store",
+            "sendOrderInPreparation",
+            "Failed in printing the changes in the order",
+            CONSOLE_COLOR,
+            [e]
+        );
+        this.logRobustnessEvent("kitchen_print_fail", order, {
+            severity: "error",
+            message: "Exception while printing: " + (e?.message || String(e)),
+        });
+    },
+
+    /** Fix A "smart sent-state" decision for the AWAITED paths (no-printer,
+     * cancellation, reprint): mark sent + push UNLESS the print was a *definite*
+     * total failure (then leave the items pending to be re-sent — no duplicate, no
+     * lost order); an ambiguous failure (e.g. a timeout) is treated as sent. */
+    _robustnessApplySentState(order, printResult, printerPath, categoryCount) {
+        const definiteTotalFailure = printerPath && printResult.definiteTotalFailure;
+        if (!definiteTotalFailure) {
+            order.updateLastOrderChange();
+            this._robustnessPushSentState(order);
+            if (printerPath && !printResult.allPrinted) {
+                this.logRobustnessEvent("mark_sent_forced", order, {
+                    severity: "warning",
+                    message: printResult.anyPrinted
+                        ? "Partial kitchen print: items marked sent; reprint the failed printer(s) from the popup."
+                        : "Kitchen print unconfirmed (likely a timeout): items marked sent to prevent a duplicate. Use Reprint if nothing printed.",
+                });
+            }
+            this._robustnessSentToKitchenToast(order, categoryCount);
+        } else {
+            this.logRobustnessEvent("mark_sent_skipped", order, {
+                severity: "warning",
+                message:
+                    "Definite kitchen print failure (printer unreachable / no paper / cover open): items left pending and will be re-sent. No duplicate risk.",
+            });
+        }
+    },
+
+    /** Background half of the snappy send: print the (already-marked-sent) ticket,
+     * then reconcile. On a DEFINITE total failure roll the optimistic sent-state
+     * back to `prevPrepChange` so the items are re-sent (no lost ticket); an
+     * ambiguous failure (e.g. a timeout) is kept sent so a refresh or a second
+     * device can't re-send and duplicate it. Never throws. */
+    async _robustnessPrintAndReconcile(order, orderChange, prevPrepChange) {
+        let printResult = { anyPrinted: false, allPrinted: false };
+        try {
+            printResult = await this.printChanges(order, orderChange, false);
+        } catch (e) {
+            this._robustnessLogPrintException(order, e);
+            printResult = { anyPrinted: false, allPrinted: false };
+        }
+
+        if (printResult.definiteTotalFailure) {
+            // Roll back the optimistic sent-state: restore the pre-send snapshot,
+            // recompute the per-line "to send" flags against it, and push the
+            // reverted state so other devices revert too. The Retry/Reprint popup
+            // (raised by printChanges) also lets staff reprint.
+            order.last_order_preparation_change = prevPrepChange;
+            try {
+                this.getOrderChanges(order);
+            } catch {
+                // recompute is best-effort; reactivity refreshes it on the next render
+            }
+            order._markDirty?.();
+            this._robustnessPushSentState(order);
+            this.logRobustnessEvent("mark_sent_rolled_back", order, {
+                severity: "warning",
+                message:
+                    "Definite kitchen print failure after an optimistic send: the sent-state was rolled back so the items are re-sent. No duplicate risk.",
+            });
+        } else if (!printResult.allPrinted) {
+            this.logRobustnessEvent("mark_sent_forced", order, {
+                severity: "warning",
+                message: printResult.anyPrinted
+                    ? "Partial kitchen print: items kept sent; reprint the failed printer(s) from the popup."
+                    : "Kitchen print unconfirmed (likely a timeout): items kept sent to prevent a duplicate. Use Reprint if nothing printed.",
+            });
         }
     },
 

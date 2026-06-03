@@ -5,6 +5,14 @@ import { definePosModels } from "@point_of_sale/../tests/unit/data/generate_mode
 
 definePosModels();
 
+// The kitchen ticket prints in the BACKGROUND, so the in-flight guard is released
+// a few microtasks after `sendOrderInPreparation` returns. Flush until `pred` holds.
+const settle = async (pred = () => true, max = 200) => {
+    for (let i = 0; i < max && !pred(); i++) {
+        await Promise.resolve();
+    }
+};
+
 describe("pos_restaurant_robustness: double-send guard (Fix B)", () => {
     test("a second concurrent send for the same order is coalesced", async () => {
         const store = await setupPosEnv();
@@ -29,17 +37,20 @@ describe("pos_restaurant_robustness: double-send guard (Fix B)", () => {
         await store.sendOrderInPreparation(order);
         expect(printCalls).toBe(1);
 
-        // Releasing the first send clears the guard.
+        // Releasing the print lets the background send finish and clears the guard.
         deferred.resolve();
-        await first;
+        await first; // resolves once the send is dispatched (the print runs in the background)
+        await settle(() => !store.sendingInPreparation.has(order.uuid));
         expect(store.sendingInPreparation.has(order.uuid)).toBe(false);
 
-        // A subsequent send is allowed again.
+        // A subsequent send is allowed again; the order is already marked sent, so it
+        // goes through the (awaited) reprint branch.
         store.printChanges = async () => ({
             anyPrinted: true,
             allPrinted: true,
             retryPrinters: new Set(),
             failedNames: [],
+            definiteTotalFailure: false,
         });
         await store.sendOrderInPreparation(order);
         expect(printCalls).toBe(2);
