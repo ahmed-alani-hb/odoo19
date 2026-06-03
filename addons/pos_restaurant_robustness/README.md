@@ -28,6 +28,13 @@ Either way the **Retry/Reprint** popup is shown so staff can reprint (Reprint
 re-prints the same ticket without creating a new diff). The classifier is
 `isDefiniteNoPrint()`.
 
+The server persist (`syncAllOrders`) runs **in the background** — the Send button
+resolves (and the table closes) right after the print is confirmed, instead of
+waiting for the Odoo.sh round-trip. The local sent-state is set first (so a refresh
+restores it from IndexedDB and the kitchen state is correct), the sync starts at the
+same instant either way (cross-device timing is unchanged), and the POS pending-order
+queue retries it if it fails.
+
 > ⚠️ The reliable cure for the underlying timeouts is to restore the **direct LAN
 > connection to the IoT** (`docs/IOT_PRINTING_TROUBLESHOOTING.md`); then prints
 > confirm reliably and neither duplicates nor lost tickets occur — this is a

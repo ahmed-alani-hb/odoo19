@@ -71,7 +71,9 @@ patch(PosStore.prototype, {
      * @override
      * Reimplements the core method to fix duplicate AND lost kitchen tickets:
      *  - Fix A (smart sent-state): a send marks the items "sent"
-     *    (`order.updateLastOrderChange()`) and persists it to the server, UNLESS the
+     *    (`order.updateLastOrderChange()`) and persists it to the server (in the
+     *    background, so the Send button isn't blocked by the Odoo.sh round-trip),
+     *    UNLESS the
      *    print was a *definite* total failure (printer unreachable / out of paper /
      *    cover open — see isDefiniteNoPrint), in which case the items stay pending to
      *    be re-sent (no lost order, and no duplicate since nothing printed). An
@@ -196,18 +198,22 @@ patch(PosStore.prototype, {
             if (markedSent) {
                 order.updateLastOrderChange();
                 if (!this.models["pos.prep.display"]?.length) {
-                    try {
-                        await this.syncAllOrders({ orders: [order] });
-                    } catch (e) {
-                        // Offline / transient sync error: the sent-state is kept
-                        // locally (IndexedDB) and syncs later. Never break the send.
+                    // Persist the sent-state to the server in the BACKGROUND (not
+                    // awaited) so the Send button resolves and the table closes right
+                    // after the print is confirmed, instead of waiting for the Odoo.sh
+                    // round-trip. The local sent-state is already set above, so the
+                    // kitchen state is correct and a page refresh restores it from
+                    // IndexedDB; the sync starts at the same instant either way (so
+                    // cross-device timing is unchanged), and the POS pending-order
+                    // queue retries it if it fails.
+                    this.syncAllOrders({ orders: [order] }).catch((e) => {
                         this.logRobustnessEvent("sent_state_sync_deferred", order, {
                             severity: "warning",
                             message:
-                                "Sent-to-kitchen state kept locally; server sync deferred. " +
+                                "Background sent-state sync failed; kept locally, will retry. " +
                                 (e?.message || String(e)),
                         });
-                    }
+                    });
                 }
                 if (printerPath && !printResult.allPrinted) {
                     this.logRobustnessEvent("mark_sent_forced", order, {
