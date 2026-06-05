@@ -1,8 +1,8 @@
 import { patch } from "@web/core/utils/patch";
 import { PosStore, CONSOLE_COLOR } from "@point_of_sale/app/services/pos_store";
 import { changesToOrder } from "@point_of_sale/app/models/utils/order_change";
-import { RetryPrintPopup } from "@point_of_sale/app/components/popups/retry_print_popup/retry_print_popup";
 import { logPosMessage } from "@point_of_sale/app/utils/pretty_console_log";
+import { FailedPrintsPopup } from "@pos_restaurant_robustness/app/overrides/failed_prints_popup";
 import { _t } from "@web/core/l10n/translation";
 
 // Classify a *failed* print result. A "definite no-print" means the printer
@@ -452,49 +452,162 @@ patch(PosStore.prototype, {
             }
         }
 
-        // Ambiguous (timeout) failures: the ticket most likely printed and the order
-        // is already kept "sent", so don't raise the blocking popup and NEVER offer
-        // Retry (it would duplicate). A non-blocking notice is enough.
-        if (ambiguousFailures.length) {
+        // Record any failure as a persistent, per-order "failed prints" entry. This
+        // drives the on-table bubble (floor screen) and the retry/clear panel shown
+        // when the table is opened (see setTableFromUi) — far harder to miss than a
+        // transient popup. A brief toast gives immediate feedback; the actual
+        // recovery (retry only the failed printers -> no duplicate, or clear) happens
+        // from the table panel.
+        if (definiteFailures.length || ambiguousFailures.length) {
+            this._recordFailedPrint(order, orderChange, reprint, definiteFailures, ambiguousFailures);
             this.notification.add(
-                _t(
-                    "%s: sent, but the print wasn't confirmed (slow IoT link). It most likely printed — only reprint from the order if nothing came out.",
-                    ambiguousNames.join(_t(", "))
-                ),
+                definiteFailures.length
+                    ? _t("%s didn't print — open the table to retry.", definiteNames.join(_t(", ")))
+                    : _t(
+                          "%s: print not confirmed — open the table to check.",
+                          ambiguousNames.join(_t(", "))
+                      ),
                 { type: "warning" }
             );
         }
 
-        // Definite no-print failures: nothing came out, so this is the real safety
-        // net — a blocking popup whose Retry re-sends ONLY those printers.
-        if (definiteFailures.length) {
-            this.dialog.add(RetryPrintPopup, {
-                title: _t("Kitchen ticket didn't print"),
-                message: _t(
-                    "%s did not print — check the printer is powered on, has paper, and its cover is closed.",
-                    definiteNames.join(_t(", "))
-                ),
-                canRetry: true,
-                retry: async () => {
-                    this.logRobustnessEvent("kitchen_print_retry", order, {
-                        printer_name: definiteNames.join(", "),
-                        message: "User retried the failed kitchen printer(s).",
-                    });
-                    // Retry targets only the printers that definitely did not print,
-                    // so neither the printers that already succeeded nor the ambiguous
-                    // (likely-printed) ones are re-hit — no duplicate.
-                    const res = await this.printChanges(order, orderChange, reprint, retryPrinters);
-                    if (res && res.allPrinted) {
-                        // Now fully sent: complete the deferred "mark as sent" step.
-                        order.updateLastOrderChange();
-                        if (!this.models["pos.prep.display"]?.length) {
-                            await this.syncAllOrders({ orders: [order] });
-                        }
-                    }
-                },
-            });
-        }
-
         return { anyPrinted: isPrinted, allPrinted, retryPrinters, failedNames, definiteTotalFailure };
+    },
+
+    // --- Failed-print tracker (per-order, device-local; survives refresh via uiState) ---
+
+    /** The order's failed-print entries, lazily initialised. */
+    getFailedPrints(order) {
+        if (!order?.uiState) {
+            return [];
+        }
+        if (!order.uiState.failedPrints) {
+            order.uiState.failedPrints = [];
+        }
+        return order.uiState.failedPrints;
+    },
+
+    /** Total unresolved failed prints across a table's open orders (for the bubble). */
+    getFailedPrintCount(table) {
+        let count = 0;
+        try {
+            for (const o of this.models["pos.order"].filter(
+                (o) => o.table_id?.id === table.id && !o.finalized
+            )) {
+                count += o.uiState?.failedPrints?.length || 0;
+            }
+        } catch {
+            // observability helper must never break the floor screen
+        }
+        return count;
+    },
+
+    /** Record a failed print so it can be retried/cleared later from the table. */
+    _recordFailedPrint(order, orderChange, reprint, definiteFailures = [], ambiguousFailures = []) {
+        try {
+            const printers = [
+                ...definiteFailures.map((f) => ({
+                    id: f.printer?.config?.id,
+                    name: f.name,
+                    definite: true,
+                })),
+                ...ambiguousFailures.map((f) => ({
+                    id: f.printer?.config?.id,
+                    name: f.name,
+                    definite: false,
+                })),
+            ];
+            this.getFailedPrints(order).push({
+                id: `${order.uuid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+                change: orderChange,
+                reprint: Boolean(reprint),
+                printers,
+                when: Date.now(),
+            });
+        } catch {
+            // bookkeeping must never break printing
+        }
+    },
+
+    clearFailedPrint(order, entryId) {
+        try {
+            const list = this.getFailedPrints(order);
+            const idx = list.findIndex((e) => e.id === entryId);
+            if (idx >= 0) {
+                list.splice(idx, 1);
+            }
+        } catch {
+            // ignore
+        }
+    },
+
+    clearAllFailedPrints(order) {
+        try {
+            this.getFailedPrints(order).length = 0;
+        } catch {
+            // ignore
+        }
+    },
+
+    /** Reprint a failed entry to ONLY the printers that failed (no duplicate of the
+     * printers that already succeeded). On full success the entry is removed and the
+     * items are confirmed sent; a fresh entry is recorded by printChanges if it
+     * fails again. */
+    async retryFailedPrint(order, entryId) {
+        const entry = this.getFailedPrints(order).find((e) => e.id === entryId);
+        if (!entry) {
+            return;
+        }
+        const ids = new Set((entry.printers || []).map((p) => p.id));
+        const printers = this.unwatched.printers.filter((p) => ids.has(p.config.id));
+        if (!printers.length) {
+            // the printer is no longer configured; nothing to retry
+            this.clearFailedPrint(order, entryId);
+            return;
+        }
+        this.logRobustnessEvent("kitchen_print_retry", order, {
+            printer_name: (entry.printers || []).map((p) => p.name).join(", "),
+            message: "User retried failed kitchen print(s) from the table panel.",
+        });
+        let res;
+        try {
+            res = await this.printChanges(order, entry.change, entry.reprint, printers);
+        } catch {
+            // keep the entry so it can be retried again
+            return;
+        }
+        // Remove the entry we just retried (printChanges recorded a fresh one if it
+        // failed again).
+        this.clearFailedPrint(order, entryId);
+        if (res && res.allPrinted) {
+            order.updateLastOrderChange();
+            if (!this.models["pos.prep.display"]?.length) {
+                this.syncAllOrders({ orders: [order] }).catch(() => {});
+            }
+        }
+    },
+
+    async retryAllFailedPrints(order) {
+        for (const entry of [...this.getFailedPrints(order)]) {
+            await this.retryFailedPrint(order, entry.id);
+        }
+    },
+
+    /**
+     * @override (pos_restaurant) — after a waiter opens a table, surface any
+     * unresolved failed kitchen prints for its current order so they can retry
+     * (without duplication) or clear them. Wrapped so it can never break opening a
+     * table.
+     */
+    async setTableFromUi(table, orderUuid = null) {
+        await super.setTableFromUi(table, orderUuid);
+        try {
+            const order = this.getOrder();
+            if (order && this.getFailedPrints(order).length) {
+                this.dialog.add(FailedPrintsPopup, { order });
+            }
+        } catch {
+            // never let the panel break table opening
+        }
     },
 });
