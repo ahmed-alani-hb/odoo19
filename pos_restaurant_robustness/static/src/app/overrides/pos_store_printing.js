@@ -17,16 +17,32 @@ const DEFINITE_NO_PRINT_CODES = [
     "EPTR_COVER_OPEN",
     "EPTR_REC_EMPTY",
 ];
+// Connection-failure dialog titles the (IoT) printer returns when the job never
+// reached the printer at all — the IoT box was unreachable, the client was
+// offline, or the box couldn't find the printer. Nothing printed in any of these,
+// so re-sending is safe and necessary.
+const DEFINITE_NO_PRINT_TITLES = [
+    "connection to iot box failed",
+    "no internet connection",
+    "connection to the printer failed",
+];
+// Body phrasings for the same "never printed" conditions, for printers/paths that
+// don't set a machine-readable errorCode (the IoT printer only returns text). A
+// TIMEOUT is deliberately NOT here: the job was sent and may have printed, so it
+// stays "ambiguous" (no auto-resend, no Retry) to avoid a duplicate.
+const DEFINITE_NO_PRINT_BODY =
+    /not reachable|unreachable|could not reach|cover open|out of paper|no paper|paper.*(empty|out)|device not found|cannot find the printer|receipt printer isn|turned on and connected|connected to the internet before retrying|printer.*off/;
 export function isDefiniteNoPrint(result) {
     const code = String(result?.errorCode || "").toUpperCase();
     if (DEFINITE_NO_PRINT_CODES.some((c) => code.includes(c))) {
         return true;
     }
-    // Fallback for printers that don't set a machine-readable errorCode.
+    const title = String(result?.message?.title || "").toLowerCase();
+    if (DEFINITE_NO_PRINT_TITLES.some((t) => title.includes(t))) {
+        return true;
+    }
     const body = String(result?.message?.body || "").toLowerCase();
-    return /not reachable|unreachable|cover open|out of paper|no paper|paper.*(empty|out)|device not found|printer.*off/.test(
-        body
-    );
+    return DEFINITE_NO_PRINT_BODY.test(body);
 }
 
 patch(PosStore.prototype, {
