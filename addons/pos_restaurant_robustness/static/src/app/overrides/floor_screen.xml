@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+
+    <t t-name="pos_restaurant_robustness.FloorScreen" t-inherit="pos_restaurant.FloorScreen" t-inherit-mode="extension">
+        <!-- A small warning bubble on any table with unresolved failed kitchen
+             prints, next to the existing item-count badge. Opening the table shows
+             the retry/clear panel. -->
+        <xpath expr="//div[hasclass('order-count')]" position="after">
+            <t t-set="failedPrintCount" t-value="pos.getFailedPrintCount(table)"/>
+            <div t-if="failedPrintCount > 0"
+                 class="d-flex align-items-center justify-content-center position-absolute top-0 start-0 rounded-3 smaller fw-bolder z-2 badge text-bg-warning gap-1"
+                 title="Kitchen prints to resolve — open the table to retry or clear">
+                <i class="fa fa-print" role="img" aria-label="Failed kitchen prints"/>
+                <t t-esc="failedPrintCount"/>
+            </div>
+        </xpath>
+    </t>
+
+</templates>

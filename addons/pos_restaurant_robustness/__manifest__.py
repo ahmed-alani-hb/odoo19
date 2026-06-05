@@ -34,6 +34,14 @@ What it does
   event, so staff are no longer interrupted by a popup that needs no action. Done
   with a fail-safe hook on the core dialog service (it can only ever fall through to
   showing the dialog, never break other popups such as Retry-print).
+* **Failed kitchen prints, surfaced on the table**: instead of a transient popup
+  that's easy to miss (a printer that times out never showed one), any ticket that
+  fails to print is recorded on the order and shown as a small warning bubble on
+  the table in the floor screen. Opening the table presents a panel to Retry
+  (reprints ONLY the printers that failed — never duplicating a ticket that already
+  came out) or Clear each failed print, with each entry labelled "didn't print"
+  (safe to retry) or "may have printed" (retry only if nothing came out). Device-
+  local (survives a refresh on that device).
 * **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice, and
   auto-releases after 30s so a hung IoT print / order-sync can never freeze the
