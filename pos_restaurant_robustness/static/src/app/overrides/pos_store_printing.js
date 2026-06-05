@@ -51,6 +51,10 @@ patch(PosStore.prototype, {
         // order uuid; the core `syncingOrders` set is keyed inconsistently
         // (adds id, deletes uuid) and only guards `syncAllOrders`.
         this.sendingInPreparation = new Set();
+        // Max time to wait for a kitchen print to confirm before the optimistic send's
+        // "pending" marker is surfaced as UNCONFIRMED (so a hung/lost print is never
+        // silent). Instance property so tests can shorten it.
+        this.printConfirmTimeoutMs = 25000;
         return await super.setup(...arguments);
     },
 
@@ -223,16 +227,26 @@ patch(PosStore.prototype, {
             order.updateLastOrderChange();
             this._robustnessPushSentState(order);
             this._robustnessSentToKitchenToast(order, categoryCount);
+            // Persist an "unconfirmed" marker NOW (before the print is even attempted)
+            // so that a hung print, a lost IoT status event, or a refresh/crash before
+            // the background print settles can NEVER leave the ticket silently
+            // unprinted: the marker stays in uiState and is converted to a surfaced
+            // failure either by the reconcile timeout below, or — if this session dies
+            // first — by the startup sweep after the next reload. An in-flight pending
+            // marker does not alarm; only its converted (failed/unconfirmed) form does.
+            const pendingId = this._recordPendingPrint(order, orderChange, false);
             this.logRobustnessEvent("kitchen_send_dispatched", order, {
                 message:
                     "Order marked sent and pushed to the server; the kitchen ticket is printing in the background.",
             });
-            // 3) Print the ticket in the BACKGROUND; reconcile (roll back on a
-            //    definite failure) when it settles, then release the in-flight guard.
+            // 3) Print the ticket in the BACKGROUND; reconcile (resolve the pending
+            //    marker, roll back on a definite failure) when it settles OR when the
+            //    confirmation times out, then release the in-flight guard.
             backgroundPrint = this._robustnessPrintAndReconcile(
                 order,
                 orderChange,
-                prevPrepChange
+                prevPrepChange,
+                pendingId
             ).finally(() => releaseGuard("done"));
         } finally {
             if (!backgroundPrint) {
@@ -314,24 +328,78 @@ patch(PosStore.prototype, {
     },
 
     /** Background half of the snappy send: print the (already-marked-sent) ticket,
-     * then reconcile. On a DEFINITE total failure roll the optimistic sent-state
-     * back to `prevPrepChange` so the items are re-sent (no lost ticket); an
-     * ambiguous failure (e.g. a timeout) is kept sent so a refresh or a second
-     * device can't re-send and duplicate it. Never throws. */
-    async _robustnessPrintAndReconcile(order, orderChange, prevPrepChange) {
-        let printResult = { anyPrinted: false, allPrinted: false };
-        try {
-            printResult = await this.printChanges(order, orderChange, false);
-        } catch (e) {
-            this._robustnessLogPrintException(order, e);
-            printResult = { anyPrinted: false, allPrinted: false };
-        }
+     * then reconcile the pre-created `pendingId` marker. The IoT (pos_iot) print
+     * promise only settles when a status event comes back, and a powered-off / stuck
+     * printer or a lost event can leave it pending FOREVER — which is exactly what let
+     * a send be marked sent with nothing printed and NOTHING flagged. So we bound the
+     * wait: within the window we resolve the marker from the real result (remove on
+     * success, convert to a surfaced failure otherwise, rolling the optimistic
+     * sent-state back on a definite total failure); on timeout we convert the marker
+     * to a surfaced "unconfirmed" failure so it can never be silent. Never throws. */
+    async _robustnessPrintAndReconcile(order, orderChange, prevPrepChange, pendingId) {
+        let printResult = null;
+        // record:false — we own `pendingId` and convert it in place from the returned
+        // failure lists, so printChanges must not record a second entry.
+        const printPromise = this.printChanges(order, orderChange, false, this.unwatched.printers, {
+            record: false,
+        })
+            .then((r) => (printResult = r))
+            .catch((e) => {
+                this._robustnessLogPrintException(order, e);
+                printResult = {
+                    anyPrinted: false,
+                    allPrinted: false,
+                    definiteTotalFailure: false,
+                    definiteFailures: [],
+                    ambiguousFailures: [],
+                };
+            });
 
+        const timeout = new Promise((resolve) =>
+            setTimeout(resolve, this.printConfirmTimeoutMs ?? 25000)
+        );
+        await Promise.race([printPromise, timeout]);
+
+        if (printResult) {
+            this._reconcilePending(order, pendingId, printResult, prevPrepChange);
+        } else {
+            // No answer from the printer within the window: surface it NOW so it is
+            // never silent. Keep listening — a late success clears the marker; a late
+            // failure refines its reason.
+            this._convertPendingToUnconfirmed(order, pendingId);
+            this.logRobustnessEvent("kitchen_print_unconfirmed", order, {
+                severity: "error",
+                printer_name: this._pendingPrinterNames(order, pendingId),
+                message:
+                    "No confirmation from the printer within " +
+                    Math.round((this.printConfirmTimeoutMs ?? 25000) / 1000) +
+                    "s; kept sent and flagged UNCONFIRMED. Reprint from the table if nothing came out.",
+            });
+            printPromise.then(() => {
+                if (printResult) {
+                    this._reconcilePending(order, pendingId, printResult, prevPrepChange);
+                }
+            });
+        }
+    },
+
+    /** Resolve a pending print marker from a settled print result. */
+    _reconcilePending(order, pendingId, printResult, prevPrepChange) {
+        if (printResult.allPrinted) {
+            // Printed fine — drop the marker.
+            this.clearFailedPrint(order, pendingId);
+            return;
+        }
+        // Failure — convert the marker into a surfaced failed entry with reasons.
+        this._convertPending(
+            order,
+            pendingId,
+            printResult.definiteFailures || [],
+            printResult.ambiguousFailures || []
+        );
         if (printResult.definiteTotalFailure) {
-            // Roll back the optimistic sent-state: restore the pre-send snapshot,
-            // recompute the per-line "to send" flags against it, and push the
-            // reverted state so other devices revert too. The Retry/Reprint popup
-            // (raised by printChanges) also lets staff reprint.
+            // Roll back the optimistic sent-state so the items are re-sent (no lost
+            // ticket); recompute per-line flags and push so other devices revert too.
             order.last_order_preparation_change = prevPrepChange;
             try {
                 this.getOrderChanges(order);
@@ -345,11 +413,11 @@ patch(PosStore.prototype, {
                 message:
                     "Definite kitchen print failure after an optimistic send: the sent-state was rolled back so the items are re-sent. No duplicate risk.",
             });
-        } else if (!printResult.allPrinted) {
+        } else {
             this.logRobustnessEvent("mark_sent_forced", order, {
                 severity: "warning",
                 message: printResult.anyPrinted
-                    ? "Partial kitchen print: items kept sent; reprint the failed printer(s) from the popup."
+                    ? "Partial kitchen print: items kept sent; reprint the failed printer(s) from the table panel."
                     : "Kitchen print unconfirmed (likely a timeout): items kept sent to prevent a duplicate. Use Reprint if nothing printed.",
             });
         }
@@ -364,7 +432,7 @@ patch(PosStore.prototype, {
      * outcome, and makes the retry popup complete the "mark as sent" step when the
      * previously-failed printers finally succeed.
      */
-    async printChanges(order, orderChange, reprint = false, printers = this.unwatched.printers) {
+    async printChanges(order, orderChange, reprint = false, printers = this.unwatched.printers, opts = {}) {
         let isPrinted = false;
         // Per-failure classification drives BOTH the wording and the action:
         //  - definite no-print (offline / no paper / cover open): nothing came out,
@@ -453,12 +521,17 @@ patch(PosStore.prototype, {
         }
 
         // Record any failure as a persistent, per-order "failed prints" entry. This
-        // drives the on-table bubble (floor screen) and the retry/clear panel shown
-        // when the table is opened (see setTableFromUi) — far harder to miss than a
-        // transient popup. A brief toast gives immediate feedback; the actual
-        // recovery (retry only the failed printers -> no duplicate, or clear) happens
-        // from the table panel.
-        if (definiteFailures.length || ambiguousFailures.length) {
+        // drives the on-table bubble (floor screen), the retry/clear panel shown when
+        // the table is opened (see setTableFromUi), and the persistent alert banner —
+        // far harder to miss than a transient popup. A brief toast gives immediate
+        // feedback; the actual recovery (retry only the failed printers -> no
+        // duplicate, or clear) happens from the table panel.
+        //
+        // `opts.record === false` is used by the optimistic background reconcile,
+        // which owns a pre-created "pending" entry it converts in place (so we don't
+        // record a SECOND entry here); it reads `definiteFailures`/`ambiguousFailures`
+        // off the return value instead.
+        if (opts.record !== false && (definiteFailures.length || ambiguousFailures.length)) {
             this._recordFailedPrint(order, orderChange, reprint, definiteFailures, ambiguousFailures);
             this.notification.add(
                 definiteFailures.length
@@ -471,7 +544,15 @@ patch(PosStore.prototype, {
             );
         }
 
-        return { anyPrinted: isPrinted, allPrinted, retryPrinters, failedNames, definiteTotalFailure };
+        return {
+            anyPrinted: isPrinted,
+            allPrinted,
+            retryPrinters,
+            failedNames,
+            definiteTotalFailure,
+            definiteFailures,
+            ambiguousFailures,
+        };
     },
 
     // --- Failed-print tracker (per-order, device-local; survives refresh via uiState) ---
@@ -487,19 +568,69 @@ patch(PosStore.prototype, {
         return order.uiState.failedPrints;
     },
 
-    /** Total unresolved failed prints across a table's open orders (for the bubble). */
+    /** The order's SURFACED failed prints (excludes in-flight "pending" markers). */
+    getActiveFailedPrints(order) {
+        return this.getFailedPrints(order).filter((e) => !e.pending);
+    },
+
+    /** Total surfaced failed prints across a table's open orders (for the bubble).
+     * In-flight pending markers are excluded so a normal send doesn't flash a badge. */
     getFailedPrintCount(table) {
         let count = 0;
         try {
             for (const o of this.models["pos.order"].filter(
                 (o) => o.table_id?.id === table.id && !o.finalized
             )) {
-                count += o.uiState?.failedPrints?.length || 0;
+                count += (o.uiState?.failedPrints || []).filter((e) => !e.pending).length;
             }
         } catch {
             // observability helper must never break the floor screen
         }
         return count;
+    },
+
+    /** Active kitchen-print alerts across all open orders, for the persistent banner.
+     * Each: { orderUuid, order, table, printers, reason, entryId }. Never throws. */
+    getKitchenAlerts() {
+        const alerts = [];
+        try {
+            for (const o of this.models["pos.order"].filter((o) => !o.finalized)) {
+                for (const e of o.uiState?.failedPrints || []) {
+                    if (e.pending) {
+                        continue;
+                    }
+                    alerts.push({
+                        orderUuid: o.uuid,
+                        order: o,
+                        table: o.table_id?.table_number ?? o.table_id?.name ?? "",
+                        printers: (e.printers || [])
+                            .map((p) => p.name)
+                            .filter(Boolean)
+                            .join(", "),
+                        reason:
+                            e.reason ||
+                            ((e.printers || []).some((p) => p.definite)
+                                ? _t("didn't print")
+                                : _t("not confirmed")),
+                        entryId: e.id,
+                    });
+                }
+            }
+        } catch {
+            // banner must never break the chrome
+        }
+        return alerts;
+    },
+
+    /** Open the retry/clear panel for a banner alert's order (works from any screen). */
+    openKitchenAlert(alert) {
+        try {
+            if (alert?.order) {
+                this.dialog.add(FailedPrintsPopup, { order: alert.order });
+            }
+        } catch {
+            // never let the banner break the chrome
+        }
     },
 
     /** Record a failed print so it can be retried/cleared later from the table. */
@@ -526,6 +657,84 @@ patch(PosStore.prototype, {
             });
         } catch {
             // bookkeeping must never break printing
+        }
+    },
+
+    /** Record an in-flight "pending" marker the instant an optimistic send is
+     * dispatched, so the print can never be silently lost (it is converted to a
+     * surfaced failure by the reconcile timeout, or by the startup sweep after a
+     * reload). Returns the entry id. Targets all kitchen printers (the actual failed
+     * set replaces them on conversion). Never throws. */
+    _recordPendingPrint(order, orderChange, reprint) {
+        try {
+            const id = `${order?.uuid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+            const printers = (this.unwatched.printers || []).map((p) => ({
+                id: p.config?.id,
+                name: p.config?.name,
+                definite: false,
+            }));
+            this.getFailedPrints(order).push({
+                id,
+                change: orderChange,
+                reprint: Boolean(reprint),
+                printers,
+                pending: true,
+                when: Date.now(),
+            });
+            return id;
+        } catch {
+            return null;
+        }
+    },
+
+    /** Convert a pending marker into a surfaced failed entry with the real failed
+     * printers + a human reason. No-op if the marker is gone (e.g. user cleared it). */
+    _convertPending(order, pendingId, definiteFailures = [], ambiguousFailures = []) {
+        try {
+            const entry = this.getFailedPrints(order).find((e) => e.id === pendingId);
+            if (!entry) {
+                return;
+            }
+            const printers = [
+                ...definiteFailures.map((f) => ({ id: f.printer?.config?.id, name: f.name, definite: true })),
+                ...ambiguousFailures.map((f) => ({ id: f.printer?.config?.id, name: f.name, definite: false })),
+            ];
+            if (printers.length) {
+                entry.printers = printers;
+            }
+            entry.pending = false;
+            entry.unconfirmed = ambiguousFailures.length > 0 && definiteFailures.length === 0;
+            entry.reason = definiteFailures.length ? _t("Didn't print") : _t("Print not confirmed");
+        } catch {
+            // ignore
+        }
+    },
+
+    /** Convert a pending marker into a surfaced "unconfirmed" failure (the printer
+     * never answered within the timeout). Targeted printers are kept. */
+    _convertPendingToUnconfirmed(order, pendingId) {
+        try {
+            const entry = this.getFailedPrints(order).find((e) => e.id === pendingId);
+            if (!entry) {
+                return;
+            }
+            entry.pending = false;
+            entry.unconfirmed = true;
+            entry.reason = _t("No response from printer — not confirmed");
+        } catch {
+            // ignore
+        }
+    },
+
+    _pendingPrinterNames(order, pendingId) {
+        try {
+            const e = this.getFailedPrints(order).find((x) => x.id === pendingId);
+            return (e?.printers || [])
+                .map((p) => p.name)
+                .filter(Boolean)
+                .join(", ");
+        } catch {
+            return "";
         }
     },
 
@@ -590,6 +799,35 @@ patch(PosStore.prototype, {
     async retryAllFailedPrints(order) {
         for (const entry of [...this.getFailedPrints(order)]) {
             await this.retryFailedPrint(order, entry.id);
+        }
+    },
+
+    /**
+     * @override — after orders are loaded, sweep any "pending" print markers left by
+     * a previous session that died mid-send (refresh/close/crash before the
+     * background print settled). Their in-memory reconcile is gone, so they would
+     * otherwise linger forever; convert them to surfaced "unconfirmed" failures so the
+     * (possibly unprinted) ticket is visible on the table + banner. Never throws.
+     */
+    async afterProcessServerData() {
+        const res = await super.afterProcessServerData(...arguments);
+        try {
+            this._sweepOrphanPendingPrints();
+        } catch {
+            // sweep must never break POS startup
+        }
+        return res;
+    },
+
+    _sweepOrphanPendingPrints() {
+        for (const o of this.models["pos.order"].getAll()) {
+            for (const e of o.uiState?.failedPrints || []) {
+                if (e.pending) {
+                    e.pending = false;
+                    e.unconfirmed = true;
+                    e.reason = _t("Not confirmed before reload — reprint if nothing printed");
+                }
+            }
         }
     },
 

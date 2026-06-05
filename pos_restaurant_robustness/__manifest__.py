@@ -42,6 +42,17 @@ What it does
   came out) or Clear each failed print, with each entry labelled "didn't print"
   (safe to retry) or "may have printed" (retry only if nothing came out). Device-
   local (survives a refresh on that device).
+* **No silent kitchen prints (optimistic-send hardening)**: the fast "mark sent +
+  print in the background" path could leave a ticket silently unprinted if the IoT
+  print never reported back (promise hung forever) or the screen was refreshed
+  before it settled — the order showed as sent with nothing printed and nothing
+  flagged. Now every send writes a persisted "unconfirmed" marker the instant it is
+  dispatched; the background print is bounded by a timeout (~25s) that converts the
+  marker to a surfaced failure if no confirmation arrives, a confirmed print clears
+  it, and a startup sweep surfaces any markers orphaned by a refresh/crash. A
+  persistent on-screen alert banner (table + printer + reason), shown on every
+  screen and clearing only when retried/dismissed, makes a delayed failure
+  impossible to miss mid-rush.
 * **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice, and
   auto-releases after 30s so a hung IoT print / order-sync can never freeze the

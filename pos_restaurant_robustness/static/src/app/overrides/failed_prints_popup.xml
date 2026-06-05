@@ -16,9 +16,10 @@
                             <span class="fw-bolder">
                                 <i class="fa fa-print me-1" role="img" aria-label="Printer"/>
                                 <t t-esc="entryNames(entry)"/>
+                                <span t-if="entryReason(entry)" class="badge text-bg-light ms-1 fw-normal" t-esc="entryReason(entry)"/>
                             </span>
                             <small t-if="entryMayHavePrinted(entry)" class="text-warning">
-                                May have printed (timeout) — retry only if nothing came out.
+                                May have printed (timeout/unconfirmed) — retry only if nothing came out.
                             </small>
                             <small t-else="" class="text-muted">
                                 Didn't print — safe to retry.

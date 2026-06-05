@@ -26,11 +26,17 @@ export class FailedPrintsPopup extends Component {
     }
 
     get entries() {
-        return this.pos.getFailedPrints(this.props.order);
+        // Only SURFACED entries — in-flight "pending" markers (a send still printing)
+        // are not shown here.
+        return this.pos.getActiveFailedPrints(this.props.order);
     }
 
     entryNames(entry) {
-        return (entry.printers || []).map((p) => p.name).join(_t(", "));
+        return (entry.printers || []).map((p) => p.name).filter(Boolean).join(_t(", "));
+    }
+
+    entryReason(entry) {
+        return entry.reason || "";
     }
 
     entryMayHavePrinted(entry) {
