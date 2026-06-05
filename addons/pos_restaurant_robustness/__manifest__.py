@@ -28,6 +28,12 @@ What it does
   ticket most likely printed) shows a non-blocking notice and does NOT offer Retry,
   because retrying a job that already printed would duplicate it. The wording names
   the real culprit instead of blaming the IoT Box for a printer problem.
+* **No more blocking "IoT Box Warning" popup**: the informational modal that
+  Enterprise pos_iot raises every time the POS falls back from the local network to
+  the websocket path (which keeps working) is demoted to a Kitchen Diagnostics
+  event, so staff are no longer interrupted by a popup that needs no action. Done
+  with a fail-safe hook on the core dialog service (it can only ever fall through to
+  showing the dialog, never break other popups such as Retry-print).
 * **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice, and
   auto-releases after 30s so a hung IoT print / order-sync can never freeze the
