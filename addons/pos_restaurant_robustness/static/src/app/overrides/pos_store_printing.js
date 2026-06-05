@@ -350,9 +350,15 @@ patch(PosStore.prototype, {
      */
     async printChanges(order, orderChange, reprint = false, printers = this.unwatched.printers) {
         let isPrinted = false;
-        let sawAmbiguousFailure = false; // a failure that may still have printed (e.g. a timeout)
-        const unsuccessfulPrints = [];
-        const retryPrinters = new Set();
+        // Per-failure classification drives BOTH the wording and the action:
+        //  - definite no-print (offline / no paper / cover open): nothing came out,
+        //    so Retry is safe and correct.
+        //  - ambiguous (chiefly an IoT timeout): the job has usually already reached
+        //    the box and printed — the POS just gave up waiting for the ack — so
+        //    Retry would print a SECOND copy. We never offer Retry for these; the
+        //    order is already kept "sent", so we only show a non-blocking notice.
+        const definiteFailures = []; // { printer, name }
+        const ambiguousFailures = []; // { printer, name }
 
         for (const printer of printers) {
             for (const change of orderChange) {
@@ -372,31 +378,33 @@ patch(PosStore.prototype, {
                     result = await this.printOrderChanges(data, printer);
                     if (result.successful) {
                         isPrinted = true;
-                    }
-
-                    if (!result.successful) {
-                        retryPrinters.add(printer);
-                        unsuccessfulPrints.push(
-                            printer.config.name + ": " + (result.message?.body || "")
-                        );
-                        if (!isDefiniteNoPrint(result)) {
-                            sawAmbiguousFailure = true;
+                        if (result.warningCode) {
+                            this.displayPrinterWarning(result, printer.config.name);
                         }
-                    } else if (result.warningCode) {
-                        this.displayPrinterWarning(result, printer.config.name);
+                    } else if (isDefiniteNoPrint(result)) {
+                        definiteFailures.push({ printer, name: printer.config.name });
+                    } else {
+                        ambiguousFailures.push({ printer, name: printer.config.name });
                     }
                 }
             }
         }
 
-        const allPrinted = isPrinted && unsuccessfulPrints.length === 0;
+        const unsuccessfulCount = definiteFailures.length + ambiguousFailures.length;
+        const allPrinted = isPrinted && unsuccessfulCount === 0;
         // A "definite total failure" = nothing printed AND every failure was a
         // definite no-print. Only then is it safe to leave the items pending for an
         // automatic re-send (the printer certainly didn't print, so re-sending can't
         // duplicate, and not re-sending would lose the order).
         const definiteTotalFailure =
-            !isPrinted && unsuccessfulPrints.length > 0 && !sawAmbiguousFailure;
-        const failedNames = [...retryPrinters].map((p) => p.config.name);
+            !isPrinted && definiteFailures.length > 0 && ambiguousFailures.length === 0;
+        // Only definite no-print printers are safe to retry; an ambiguous timeout has
+        // most likely already printed, so retrying it would duplicate.
+        const retryPrinters = new Set(definiteFailures.map((f) => f.printer));
+        const uniqueNames = (list) => [...new Set(list.map((f) => f.name))];
+        const definiteNames = uniqueNames(definiteFailures);
+        const ambiguousNames = uniqueNames(ambiguousFailures);
+        const failedNames = uniqueNames([...definiteFailures, ...ambiguousFailures]);
 
         // Don't emit ok/fail telemetry for pure reprints (e.g. the ticket screen),
         // only for real sends.
@@ -409,29 +417,56 @@ patch(PosStore.prototype, {
                 this.logRobustnessEvent("kitchen_print_partial", order, {
                     severity: "warning",
                     printer_name: failedNames.join(", "),
-                    message: "Some kitchen printers failed: " + unsuccessfulPrints.join(" | "),
+                    message:
+                        "Some kitchen printers failed. Definite no-print: " +
+                        (definiteNames.join(", ") || "none") +
+                        "; unconfirmed/timeout: " +
+                        (ambiguousNames.join(", ") || "none"),
                 });
             } else {
                 this.logRobustnessEvent("kitchen_print_fail", order, {
                     severity: "error",
                     printer_name: failedNames.join(", "),
-                    message: "All kitchen printers failed: " + unsuccessfulPrints.join(" | "),
+                    message:
+                        "All kitchen printers failed. Definite no-print: " +
+                        (definiteNames.join(", ") || "none") +
+                        "; unconfirmed/timeout: " +
+                        (ambiguousNames.join(", ") || "none"),
                 });
             }
         }
 
-        if (unsuccessfulPrints.length) {
-            const failedReceipts = unsuccessfulPrints.join("\n");
+        // Ambiguous (timeout) failures: the ticket most likely printed and the order
+        // is already kept "sent", so don't raise the blocking popup and NEVER offer
+        // Retry (it would duplicate). A non-blocking notice is enough.
+        if (ambiguousFailures.length) {
+            this.notification.add(
+                _t(
+                    "%s: sent, but the print wasn't confirmed (slow IoT link). It most likely printed — only reprint from the order if nothing came out.",
+                    ambiguousNames.join(_t(", "))
+                ),
+                { type: "warning" }
+            );
+        }
+
+        // Definite no-print failures: nothing came out, so this is the real safety
+        // net — a blocking popup whose Retry re-sends ONLY those printers.
+        if (definiteFailures.length) {
             this.dialog.add(RetryPrintPopup, {
-                message: failedReceipts,
+                title: _t("Kitchen ticket didn't print"),
+                message: _t(
+                    "%s did not print — check the printer is powered on, has paper, and its cover is closed.",
+                    definiteNames.join(_t(", "))
+                ),
                 canRetry: true,
                 retry: async () => {
                     this.logRobustnessEvent("kitchen_print_retry", order, {
-                        printer_name: failedNames.join(", "),
+                        printer_name: definiteNames.join(", "),
                         message: "User retried the failed kitchen printer(s).",
                     });
-                    // Retry targets only the printers that failed, so the printers
-                    // that already succeeded are never re-hit (no duplicate).
+                    // Retry targets only the printers that definitely did not print,
+                    // so neither the printers that already succeeded nor the ambiguous
+                    // (likely-printed) ones are re-hit — no duplicate.
                     const res = await this.printChanges(order, orderChange, reprint, retryPrinters);
                     if (res && res.allPrinted) {
                         // Now fully sent: complete the deferred "mark as sent" step.

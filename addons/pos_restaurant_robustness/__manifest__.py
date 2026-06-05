@@ -21,6 +21,13 @@ What it does
   a second device can't re-send and duplicate the ticket. A *definite* failure
   (printer unreachable / out of paper / cover open) keeps the items pending so they
   are re-sent and never lost. The Retry/Reprint popup covers both.
+* **Clear, duplicate-safe print-failure messages**: failures are routed by cause.
+  A *definite no-print* (printer offline / out of paper / cover open) shows a
+  blocking popup whose Retry re-sends ONLY the printers that truly didn't print.
+  An *ambiguous timeout* (the IoT Box was reached but didn't confirm in time — the
+  ticket most likely printed) shows a non-blocking notice and does NOT offer Retry,
+  because retrying a job that already printed would duplicate it. The wording names
+  the real culprit instead of blaming the IoT Box for a printer problem.
 * **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice, and
   auto-releases after 30s so a hung IoT print / order-sync can never freeze the
