@@ -53,16 +53,6 @@ What it does
   persistent on-screen alert banner (table + printer + reason), shown on every
   screen and clearing only when retried/dismissed, makes a delayed failure
   impossible to miss mid-rush.
-* **IoT Box: stop kitchen print queues getting permanently stuck**: the Odoo IoT
-  Box adds printers to CUPS with no error policy, so CUPS' default 'stop-printer'
-  pauses the queue on the first failed job (printer briefly off / no paper / cover
-  open) and never re-enables it — nothing prints, even after the printer is back,
-  until the Box is restarted. A small IoT handler shipped with this module (served
-  to the Box via /iot/get_handlers, see static/src/iot_handlers/) runs a guarded
-  background watchdog on the Box that sets every printer's error policy to
-  'retry-job' (a failed job retries instead of pausing the queue) and re-enables any
-  queue CUPS has already stopped. Purely additive and fully wrapped, so it can never
-  disturb normal printing; remove the file + restart the Box to revert.
 * **Self-healing double-send guard**: a per-order in-flight guard prevents rapid
   double-clicks / parallel sends from printing the same ticket twice, and
   auto-releases after 30s so a hung IoT print / order-sync can never freeze the
