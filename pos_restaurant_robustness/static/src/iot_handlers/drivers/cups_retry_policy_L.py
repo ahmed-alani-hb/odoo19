@@ -37,7 +37,12 @@ import time
 _logger = logging.getLogger(__name__)
 
 _THREAD_NAME = "pos_robustness_cups_retry_policy"
-_POLL_SECONDS = 20
+# Apply the policy quickly after boot so a printer can't pause before retry-job is
+# set, then keep re-asserting it fast: the Box resets the policy whenever it
+# (re)detects a printer, so frequent passes both prevent the pause and auto-resume
+# any queue within a few seconds — no Box restart ever needed.
+_INITIAL_DELAY_SECONDS = 5
+_POLL_SECONDS = 10
 _CUPS_STATE_STOPPED = 5  # IPP printer-state: 3=idle, 4=processing, 5=stopped
 
 
@@ -79,8 +84,9 @@ def _apply_once():
 
 
 def _loop():
-    # Let the Box finish loading handlers and detecting printers first.
-    time.sleep(_POLL_SECONDS)
+    # First pass shortly after boot (gives the Box time to import the printer
+    # interface and detect printers), then keep enforcing it on a tight interval.
+    time.sleep(_INITIAL_DELAY_SECONDS)
     while True:
         try:
             _apply_once()
