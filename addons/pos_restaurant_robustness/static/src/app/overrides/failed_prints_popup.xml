@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+
+    <t t-name="pos_restaurant_robustness.FailedPrintsPopup">
+        <Dialog size="'md'" title="props.order.table_id ? ('Kitchen prints to resolve — Table ' + props.order.table_id.table_number) : 'Kitchen prints to resolve'">
+            <div t-if="!entries.length" class="text-muted py-3">
+                All kitchen prints are resolved.
+            </div>
+            <div t-else="">
+                <p class="text-muted smaller mb-2">
+                    Retry reprints only the printers that failed, so it won't duplicate a ticket that already came out.
+                </p>
+                <t t-foreach="entries" t-as="entry" t-key="entry.id">
+                    <div class="d-flex justify-content-between align-items-center border-bottom py-2 gap-2">
+                        <div class="d-flex flex-column">
+                            <span class="fw-bolder">
+                                <i class="fa fa-print me-1" role="img" aria-label="Printer"/>
+                                <t t-esc="entryNames(entry)"/>
+                                <span t-if="entryReason(entry)" class="badge text-bg-light ms-1 fw-normal" t-esc="entryReason(entry)"/>
+                            </span>
+                            <small t-if="entryMayHavePrinted(entry)" class="text-warning">
+                                May have printed (timeout/unconfirmed) — retry only if nothing came out.
+                            </small>
+                            <small t-else="" class="text-muted">
+                                Didn't print — safe to retry.
+                            </small>
+                        </div>
+                        <div class="d-flex gap-2 flex-shrink-0">
+                            <button class="btn btn-primary btn-sm" t-att-disabled="state.busy" t-on-click="() => this.retry(entry)">
+                                Retry
+                            </button>
+                            <button class="btn btn-outline-secondary btn-sm" t-att-disabled="state.busy" t-on-click="() => this.clear(entry)">
+                                Clear
+                            </button>
+                        </div>
+                    </div>
+                </t>
+            </div>
+            <t t-set-slot="footer">
+                <button t-if="entries.length" class="btn btn-primary" t-att-disabled="state.busy" t-on-click="retryAll">
+                    Retry all
+                </button>
+                <button t-if="entries.length" class="btn btn-outline-secondary" t-att-disabled="state.busy" t-on-click="clearAll">
+                    Clear all
+                </button>
+                <button class="btn btn-secondary" t-on-click="() => this.props.close()">
+                    Close
+                </button>
+            </t>
+        </Dialog>
+    </t>
+
+</templates>
